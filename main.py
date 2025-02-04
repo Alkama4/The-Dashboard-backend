@@ -27,7 +27,7 @@ app.add_middleware(
 # - - - - - - - - - - - - - -  - - - - - - - #
 
 # Temporary values that are only used while testing and developing
-tempCachedSearchResults = {
+tempCachedSearchResultsMOVIE = {
   "page": 1,
   "results": [
     {
@@ -363,15 +363,138 @@ tempCachedSearchResults = {
   "total_results": 18
 }
 
-
+tempCachedSearchResultsTV = {
+  "page": 1,
+  "results": [
+    {
+      "adult": False,
+      "backdrop_path": "/rqbCbjB19amtOtFQbb3K2lgm2zv.jpg",
+      "genre_ids": [
+        16,
+        10765,
+        10759
+      ],
+      "id": 1429,
+      "origin_country": [
+        "JP"
+      ],
+      "original_language": "ja",
+      "original_name": "進撃の巨人",
+      "overview": "Many years ago, the last remnants of humanity were forced to retreat behind the towering walls of a fortified city to escape the massive, man-eating Titans that roamed the land outside their fortress. Only the heroic members of the Scouting Legion dared to stray beyond the safety of the walls – but even those brave warriors seldom returned alive. Those within the city clung to the illusion of a peaceful existence until the day that dream was shattered, and their slim chance at survival was reduced to one horrifying choice: kill – or be devoured!",
+      "popularity": 117.125,
+      "poster_path": "/hTP1DtLGFamjfu8WqjnuQdP1n4i.jpg",
+      "first_air_date": "2013-04-07",
+      "name": "Attack on Titan",
+      "vote_average": 8.664,
+      "vote_count": 6552,
+      "genres": [
+        "Animation",
+        "Sci-Fi & Fantasy",
+        "Action & Adventure"
+      ],
+      "in_watch_list": False
+    },
+    {
+      "adult": False,
+      "backdrop_path": "/2Eq2CYTV8cAJeddla6vFgIlxIH6.jpg",
+      "genre_ids": [
+        16,
+        10759,
+        35,
+        10765
+      ],
+      "id": 63510,
+      "origin_country": [
+        "JP"
+      ],
+      "original_language": "ja",
+      "original_name": "進撃！巨人中学校",
+      "overview": "Your favorite characters from Attack on Titan are back in…junior high school? Adapted from the hit spinoff manga series—Attack on Titan: Junior High (written by Saki Nakagawa), this parody reimagines Eren, Mikasa, Armin, and other characters from the original manga as students and teachers at Titan Junior High School.",
+      "popularity": 31.505,
+      "poster_path": "/el6yFiXQxiPLZLCJsukAI9UTI6J.jpg",
+      "first_air_date": "2015-10-04",
+      "name": "Attack on Titan: Junior High",
+      "vote_average": 7.8,
+      "vote_count": 189,
+      "genres": [
+        "Animation",
+        "Action & Adventure",
+        "Comedy",
+        "Sci-Fi & Fantasy"
+      ],
+      "in_watch_list": False
+    },
+    {
+      "adult": False,
+      "backdrop_path": "/xx4XR49EeQI5loG8mr5aUvQ28QN.jpg",
+      "genre_ids": [
+        10759,
+        10765
+      ],
+      "id": 65242,
+      "origin_country": [
+        "JP"
+      ],
+      "original_language": "ja",
+      "original_name": "進撃の巨人 反撃の狼煙",
+      "overview": "During the Great Titan War, a race of giants called Titans nearly wiped out humanity. The survivors built three concentric walls tall enough to keep the Titans out, but a century into that era of peace, the Colossal Titan suddenly appeared and kicked a hole through the Outer Wall, allowing other Titans to surge through. Forced to retreat behind the Middle Wall, humanity begins planning its retaliation.",
+      "popularity": 18.702,
+      "poster_path": "/6oKXmDiGhbCfaZKPjWCpMSfG9SH.jpg",
+      "first_air_date": "2015-08-15",
+      "name": "Attack on Titan: Counter Rockets",
+      "vote_average": 7.5,
+      "vote_count": 12,
+      "genres": [
+        "Action & Adventure",
+        "Sci-Fi & Fantasy"
+      ],
+      "in_watch_list": False
+    },
+    {
+      "adult": False,
+      "backdrop_path": "/jAVps245e8l1ZtZP0rZXSKT5VJC.jpg",
+      "genre_ids": [
+        10765,
+        35,
+        16,
+        10759
+      ],
+      "id": 233735,
+      "origin_country": [
+        "JP"
+      ],
+      "original_language": "ja",
+      "original_name": "「進撃の巨人」ちみキャラ劇場\"とんでけ! 訓練兵団\"",
+      "overview": "Shingeki no Kyojin Picture Drama is a series of Flash animation shorts included in the Blu-ray Disc/DVD releases, featuring the characters in chibi format. Each episode depicts their training days to become humanity's hope in the war against the Titans.",
+      "popularity": 7.57,
+      "poster_path": "/wyFtcneTysf7dd3ZqFnDPL0EZYN.jpg",
+      "first_air_date": "2013-07-17",
+      "name": "Attack on Titan Picture Drama",
+      "vote_average": 10,
+      "vote_count": 1,
+      "genres": [
+        "Sci-Fi & Fantasy",
+        "Comedy",
+        "Animation",
+        "Action & Adventure"
+      ],
+      "in_watch_list": False
+    }
+  ],
+  "total_pages": 1,
+  "total_results": 4
+}
 
 # - - - - - - - - - - - - - - - - - - - - #
 # - - - - - - - BASIC TOOLS - - - - - - - #
 # - - - - - - - - - - - - - - - - - - - - #
 
 # Function to connect to MySQL and perform a query
-def query_mysql(query: str, params: tuple = (), fetch_lastrowid=False):
+def query_mysql(query: str, params: tuple = (), fetch_last_row_id=False):
     try:
+        # Test to see if it can communicate on the bridge network and if that makes a difference
+        # mysql_host = "172.18.0.3"
+        # Doesn't really and only adds a point of failure when the ip changes. Just use the external ip provided by env.
         mysql_host = os.getenv("DB_HOST", "default")
         mysql_user = os.getenv("DB_USER", "default")
         mysql_password = os.getenv("DB_PASSWORD", "default")
@@ -394,7 +517,7 @@ def query_mysql(query: str, params: tuple = (), fetch_lastrowid=False):
         cursor.execute(query, params)
 
         # Retrieve last inserted ID if requested
-        if fetch_lastrowid:
+        if fetch_last_row_id:
             lastrowid = cursor.lastrowid
             conn.commit()
             cursor.close()
@@ -594,7 +717,7 @@ def new_transaction(data: dict):
             "INSERT INTO transactions (direction, date, counterparty, notes, userID) "
             "VALUES (%s, %s, %s, %s, %s)"
         )
-        transaction_id = query_mysql(transaction_query, (direction, date, counterparty, notes, user_id), fetch_lastrowid=True)
+        transaction_id = query_mysql(transaction_query, (direction, date, counterparty, notes, user_id), True)
 
         if not transaction_id:
             raise HTTPException(status_code=500, detail="Failed to retrieve transaction ID.")
@@ -1649,44 +1772,292 @@ def fetch_genres():
     return {"Result": "Genres updated!",}
 
 
-# ADD A VALUE BASED ON IF THE USER HAS THE TITLE ADDED
-# ADD A VALUE BASED ON IF THE USER HAS THE TITLE ADDED
-# ADD A VALUE BASED ON IF THE USER HAS THE TITLE ADDED
-# ADD A VALUE BASED ON IF THE USER HAS THE TITLE ADDED
-# |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
-# |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
-# v  v  v  v  v  v  v  v  v  v  v  v  v  v  v  v  v  v
-
+# Acts as a middle man between TMDB search and vue. 
+# Adds proper genres and the fact wether the user has added the title or not.
 @app.get("/watch_list/search")
 def watch_list_search(
+    session_key: str = Query(...),
     title_category: str = Query(..., regex="^(Movie|TV)$"),
-    title_name: str = Query(None)  # Optional
+    title_name: str = Query(None),
 ):
-    global tempCachedSearchResults  # Declare it as a global variable
+    global tempCachedSearchResultsMOVIE
+    global tempCachedSearchResultsTV
 
-    # If title_name is provided, query TMDb for search results
+    user_id = validateSessionKey(session_key, False)
+
     if title_name:
         search_results = query_tmdb(f"/search/{title_category.lower()}", {"query": title_name, "include_adult": True})
-        # tempCachedSearchResults = search_results  # Cache the results
-    # If title_name is not provided, return cached results
-    elif 'tempCachedSearchResults' in globals():
-        search_results = tempCachedSearchResults
+    elif 'tempCachedSearchResultsMOVIE' in globals() and title_category == "Movie":
+        search_results = tempCachedSearchResultsMOVIE
+    elif 'tempCachedSearchResultsTV' in globals() and title_category == "TV":
+        search_results = tempCachedSearchResultsTV
     else:
-        # In case no cached results exist, raise an error or provide a fallback
-        raise HTTPException(status_code=400, detail="Title name is required or cached data is unavailable.")
+        raise HTTPException(status_code=400, detail="Title name is required.")
 
-    # Fetch genres from MySQL based on title_category
     genre_query = "SELECT tmdb_genre_id, genre_name FROM genres"
-
-    genre_data = query_mysql(genre_query, ())  # Fetch genres from MySQL
+    genre_data = query_mysql(genre_query, ())
     if not genre_data:
         raise HTTPException(status_code=500, detail="Genres not found in the database.")
     
-    # Assuming query_mysql returns a list of tuples, convert it into a dictionary
-    genre_dict = {genre[0]: genre[1] for genre in genre_data}  # genre[0] is tmdb_genre_id, genre[1] is genre_name
+    genre_dict = {genre[0]: genre[1] for genre in genre_data}
+    
+    tmdb_ids = [result.get('id') for result in search_results.get('results', [])]
+    if tmdb_ids:
+        placeholders = ', '.join(['%s'] * len(tmdb_ids))
+        watchlist_query = f"""
+            SELECT t.tmdb_id FROM user_title_details utd
+            JOIN titles t ON utd.title_id = t.title_id
+            WHERE utd.userID = %s AND t.tmdb_id IN ({placeholders})
+        """
+        watchlist_data = query_mysql(watchlist_query, (user_id, *tmdb_ids))
+        watchlist_set = {row[0] for row in watchlist_data}
+    else:
+        watchlist_set = set()
 
-    # Replace genre IDs with genre names in search results
     for result in search_results.get('results', []):
         result['genres'] = [genre_dict.get(genre_id, "Unknown") for genre_id in result.get('genre_ids', [])]
-    
+        result['in_watch_list'] = result.get('id') in watchlist_set
+
     return search_results
+
+
+# Used for the tvs and movies to add the genres to avoid duplication
+def add_genres_for_title(title_id, tmdb_genres):
+    if not tmdb_genres:
+        return  # No genres to process
+
+    # Fetch genre IDs from the database
+    genre_query = "SELECT tmdb_genre_id, genre_id FROM genres WHERE tmdb_genre_id IN (%s)" % ','.join(
+        str(genre['id']) for genre in tmdb_genres
+    )
+    result = query_mysql(genre_query)
+    
+    # Map TMDB genre ID to local genre ID
+    genre_ids = {row[0]: row[1] for row in result}
+    
+    # Insert genre associations into title_genres
+    genre_values = ", ".join(f"({title_id}, {genre_ids[genre['id']]})" for genre in tmdb_genres if genre['id'] in genre_ids)
+    
+    if genre_values:
+        insert_genre_query = "INSERT INTO title_genres (title_id, genre_id) VALUES %s" % genre_values
+        query_mysql(insert_genre_query)
+
+def add_movie_title(title_tmdb_id):
+    try:
+        # Get the data from TMDB
+        movie_title_info = query_tmdb(f"/movie/{title_tmdb_id}", {})
+
+        # Insert the movie into titles
+        query = """
+            INSERT INTO titles (tmdb_id, imdb_id, type, title_name, title_name_original, tagline,
+                                vote_average, vote_count, overview, poster_url, backdrop_url,
+                                movie_runtime, release_date)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        params = (
+            movie_title_info.get('id'),
+            movie_title_info.get('imdb_id'),
+            'movie',
+            movie_title_info.get('title'),
+            movie_title_info.get('original_title'),
+            movie_title_info.get('tagline'),
+            movie_title_info.get('vote_average'),
+            movie_title_info.get('vote_count'),
+            movie_title_info.get('overview'),
+            movie_title_info.get('poster_path'),
+            movie_title_info.get('backdrop_path'),
+            movie_title_info.get('runtime'),
+            movie_title_info.get('release_date')
+        )
+        title_id = query_mysql(query, params, True)
+
+        # Handle genres using the new function
+        add_genres_for_title(title_id, movie_title_info.get('genres', []))
+        
+        return title_id
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+def add_tv_title(title_tmdb_id):
+    try:
+        # Get the data from tmdb
+        tv_title_info = query_tmdb(f"/tv/{title_tmdb_id}", {"append_to_response": "external_ids"})
+
+        # - - - TITLE - - - 
+        # Insert the tv-series info into titles
+        tv_title_query = """
+            INSERT INTO titles (tmdb_id, imdb_id, type, title_name, title_name_original, tagline,
+                                vote_average, vote_count, overview, poster_url, backdrop_url,
+                                movie_runtime, release_date)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        tv_title_params = (
+            tv_title_info.get('id'),
+            tv_title_info.get('external_ids', {}).get('imdb_id'),
+            'tv',
+            tv_title_info.get('name'),
+            tv_title_info.get('original_name'),
+            tv_title_info.get('tagline'),
+            tv_title_info.get('vote_average'),
+            tv_title_info.get('vote_count'),
+            tv_title_info.get('overview'),
+            tv_title_info.get('poster_path'),
+            tv_title_info.get('backdrop_path'),
+            None,   # there's no runtime since its tv
+            tv_title_info.get('first_air_date')
+        )
+        title_id = query_mysql(tv_title_query, tv_title_params, True)
+
+        # Handle genres using the function
+        add_genres_for_title(title_id, tv_title_info.get('genres', []))
+
+        # - - - SEASONS - - - 
+        # Prepare list of tuples for bulk insertion
+        tv_seasons_params = []
+        for season in tv_title_info.get('seasons', []):
+            tv_seasons_params.append((
+                title_id,
+                season.get('season_number'),
+                season.get('name'),
+                season.get('vote_average'),
+                None,  # TMDB does not provide vote_count for seasons
+                season.get('episode_count'),
+                season.get('overview'),
+                season.get('poster_path'),
+            ))
+        if tv_seasons_params:
+            placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s)"] * len(tv_seasons_params))
+            query = f"INSERT INTO seasons (title_id, season_number, season_name, vote_average, vote_count, episode_count, overview, poster_url) VALUES {placeholders}"
+            
+            # Flatten the list of tuples into a single tuple
+            flat_values = [item for sublist in tv_seasons_params for item in sublist]
+            
+            query_mysql(query, flat_values)
+
+
+        # - - - EPISODES - - - 
+        # Fetch season IDs from the database
+        season_id_query = "SELECT season_id, season_number FROM seasons WHERE title_id = %s"
+        season_id_map = {row[1]: row[0] for row in query_mysql(season_id_query, (title_id,))}
+
+        # Prepare list of tuples for bulk insertion
+        tv_episodes_params = []
+        for season in tv_title_info.get("seasons", []):
+            season_number = season.get("season_number")
+            season_id = season_id_map.get(season_number)  # Get correct season_id
+
+            if season_id:
+                season_info = query_tmdb(f"/tv/{title_tmdb_id}/season/{season_number}", {})
+
+                for episode in season_info.get("episodes", []):
+                    tv_episodes_params.append((
+                        season_id,
+                        title_id,
+                        episode.get("episode_number"),
+                        episode.get("name"),
+                        episode.get("vote_average"),
+                        episode.get("vote_count"),
+                        episode.get("overview"),
+                        episode.get("still_path"),
+                        episode.get("air_date"),
+                        episode.get("runtime")
+                    ))
+
+        if tv_episodes_params:
+            placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"] * len(tv_episodes_params))
+            query = f"""
+                INSERT INTO episodes (season_id, title_id, episode_number, episode_name, vote_average,
+                                      vote_count, overview, still_url, air_date, runtime)
+                VALUES {placeholders}
+            """
+            flat_values = [item for sublist in tv_episodes_params for item in sublist]
+            query_mysql(query, flat_values)
+
+        # Finally return the title_id for later use
+        return title_id
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@app.post("/watch_list/add_user_title")
+def add_title(data: dict):
+    try:
+        # Validate the session key
+        session_key = data.get("session_key")
+        user_id = validateSessionKey(session_key, False)
+
+        # Check if the title already exists
+        title_tmdb_id = data.get("title_tmdb_id")
+        check_title_query = """
+            SELECT title_id 
+            FROM titles
+            WHERE tmdb_id = %s
+        """
+        title_id = query_mysql(check_title_query, (title_tmdb_id,))
+
+
+        # Add the title to the titles if it doesn't exist
+        if not title_id:
+            # Get and validate the type
+            title_type = str(data.get("title_type")).lower()
+            if title_type != "movie" and title_type != "tv":
+                raise HTTPException(status_code=400, detail="Invalid title_type value!")
+            
+            # Based on type store the data
+            if title_type == "movie":
+                title_id = add_movie_title(title_tmdb_id)
+            elif title_type == "tv":
+                title_id = add_tv_title(title_tmdb_id)
+            else:
+                raise HTTPException(status_code=500, detail="Internal server error")
+        else:
+            # Get rid of unnescary arrays and wraps from the check_title_query.
+            # The add movie title can give it properly so no need to do it for it.
+            try:
+                title_id = title_id[0][0]
+            except:
+                raise HTTPException(status_code=500, detail="Its this")
+
+        # Add the link between the title and the user
+        link_user_query = """
+            INSERT INTO user_title_details (userID, title_id)
+            VALUES(%s, %s)
+        """
+        query_mysql(link_user_query, (user_id, title_id))
+
+        # If the query doesn't throw an error return success
+        return {"success": True}
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@app.post("/watch_list/remove_user_title")
+def remove_title(data: dict):
+    try:
+        # Validate the session key
+        session_key = data.get("session_key")
+        user_id = validateSessionKey(session_key, False)
+
+        # Get the TMDB title ID
+        title_tmdb_id = data.get("title_tmdb_id")
+        if not title_tmdb_id:
+            raise HTTPException(status_code=400, detail="Missing title_tmdb_id")
+
+        # Remove title from user's watch list
+        remove_query = """
+            DELETE user_title_details FROM user_title_details
+            JOIN titles ON user_title_details.title_id = titles.title_id
+            WHERE user_title_details.userID = %s AND titles.tmdb_id = %s
+        """
+        query_mysql(remove_query, (user_id, title_tmdb_id))
+
+        return {"success": True}
+    
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
