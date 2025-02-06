@@ -1,7 +1,9 @@
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 import mysql.connector
 from datetime import datetime, timedelta, date
+import time
 import random
 import string
 import calendar
@@ -546,7 +548,7 @@ def query_tmdb(endpoint: str, params: dict = {}):
         "Authorization": f"Bearer {os.getenv('TMDB_ACCESS_TOKEN', 'default_token')}",
         "Accept": "application/json"
     }
-    params["language"] = "en-US"  # No need for 'api_key' in params
+    params["language"] = "en-US"
 
     print(f"Querying TMDB: {endpoint}")
     
@@ -555,7 +557,7 @@ def query_tmdb(endpoint: str, params: dict = {}):
         return response.json() if response.status_code == 200 else {}
 
 
-
+# Used to validate the sesion key
 def validateSessionKey(session_key=None, guest_lock=True):
     if session_key != None and session_key != '':
         # Validate the session and fetch userID
@@ -570,11 +572,13 @@ def validateSessionKey(session_key=None, guest_lock=True):
         raise HTTPException(status_code=405, detail="Account required.")
 
 
+# Landing page that shows what is available (SUPER OUT OF DATE)
 @app.get("/")
 def root():
     return {
         "Head": "Hello world!",
         "Text": "Welcome to the FastAPI backend for the Vue.js frontend. The available endpoints are listed below.",
+        "Note": "This isn't updated regularly and is out of date",
         "Endp": [
             "/  (This page)",
             "/login",
@@ -1948,8 +1952,7 @@ def add_or_update_tv_title(title_tmdb_id):
         )
         title_id = query_mysql(tv_title_query, tv_title_params, True)
 
-        # When updating the fetch_last_row_id returns a 0 for some reason so fetch the id seperately
-        print(title_id)
+        # When updating the fetch_last_row_id returns a 0 sometimes for some reason so fetch the id seperately
         if title_id == 0:
             title_id_query = """
                 SELECT title_id
@@ -1957,7 +1960,6 @@ def add_or_update_tv_title(title_tmdb_id):
                 WHERE tmdb_id = %s
             """
             title_id = query_mysql(title_id_query, (title_tmdb_id,))[0][0]
-        print(title_id)
 
         # Handle genres using the function
         add_or_update_genres_for_title(title_id, tv_title_info.get('genres', []))
@@ -1965,6 +1967,8 @@ def add_or_update_tv_title(title_tmdb_id):
         # - - - SEASONS - - - 
         tv_seasons_params = []
         for season in tv_title_info.get('seasons', []):
+            if season.get('season_number') == 0:  # Skip season 0 (specials)
+                continue
             tv_seasons_params.append((
                 title_id,
                 season.get('season_number'),
@@ -2146,10 +2150,162 @@ def remove_title(data: dict):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
+@app.post("/watch_list/save_user_title_notes")
+def save_user_title_notes(data: dict):
+    try:
+        # Validate the session key
+        session_key = data.get("session_key")
+        user_id = validateSessionKey(session_key)
+
+        # Get the title ID and notes
+        notes = data.get("notes")
+        title_id = data.get("title_id")
+        if not title_id:
+            raise HTTPException(status_code=400, detail="Missing title_id")
+        
+        # Remove title from user's watch list
+        save_notes_query = """
+            UPDATE user_title_details
+            SET notes = %s
+            WHERE userID = %s AND title_id = %s
+        """
+        query_mysql(save_notes_query, (notes, user_id, title_id))
+
+        return {"message": "Notes updated successfully!"}
+    
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+def keep_title_watch_count_up_to_date(user_id, title_id=None, season_id=None, episode_id=None):
+    # If we don't have title_id, get it from season_id or episode_id
+    if not title_id:
+        if season_id:
+            # Get the title_id from the season_id
+            get_title_id_query = """
+                SELECT title_id
+                FROM seasons
+                WHERE season_id = %s
+            """
+            result = query_mysql(get_title_id_query, (season_id,))
+            title_id = result[0][0] if result else None
+        elif episode_id:
+            # Get the title_id from the episode_id
+            get_title_id_query = """
+                SELECT title_id
+                FROM episodes
+                WHERE episode_id = %s
+            """
+            result = query_mysql(get_title_id_query, (episode_id,))
+            title_id = result[0][0] if result else None
+
+    # If we have the title_id, proceed with checking episodes
+    if title_id:
+        check_all_watched_query = """
+            SELECT COUNT(*) 
+            FROM episodes e
+            LEFT JOIN user_episode_details ued ON e.episode_id = ued.episode_id AND ued.userID = %s
+            WHERE e.title_id = %s
+            AND (ued.watch_count IS NULL OR ued.watch_count = 0)
+        """
+        result = query_mysql(check_all_watched_query, (user_id, title_id))
+        
+        # Check if all episodes are watched
+        all_watched = result[0][0] == 0
+        
+        # Update the title's watch_count based on the check
+        update_title_watch_count_query = """
+            INSERT INTO user_title_details (userID, title_id, watch_count)
+            VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE watch_count = %s
+        """
+        query_mysql(update_title_watch_count_query, (user_id, title_id, 1 if all_watched else 0, 1 if all_watched else 0))
+
+@app.post("/watch_list/modify_title_watch_count")
+def modify_title_watch_count(data: dict):
+    try:
+        # Validate the session key
+        session_key = data.get("session_key")
+        user_id = validateSessionKey(session_key)
+
+        # Get the type and chosen ID
+        type = data.get("type")
+        chosen_types_id = data.get("chosen_types_id")
+        if not type:
+            raise HTTPException(status_code=400, detail="Missing type.")
+        if not chosen_types_id:
+            raise HTTPException(status_code=400, detail="Missing chosen_types_id.")
+
+        new_state = data.get("new_state")
+        if new_state == "watched":
+            watch_count = 1
+        elif new_state == "unwatched":
+            watch_count = 0
+        else:
+            raise HTTPException(status_code=400, detail="Invalid new_state. Valid values are 'watched' and 'unwatched'.")
+
+        if type == "movie":
+            title_query = """
+                INSERT INTO user_title_details (userID, title_id, watch_count)
+                VALUES (%s, %s, %s)
+                ON DUPLICATE KEY UPDATE watch_count = VALUES(watch_count)
+            """
+            query_mysql(title_query, (user_id, chosen_types_id, watch_count))
+
+        elif type == "tv":
+            episode_query = """
+                INSERT INTO user_episode_details (userID, episode_id, watch_count)
+                SELECT %s, episode_id, %s
+                FROM episodes
+                WHERE title_id = %s
+                ON DUPLICATE KEY UPDATE watch_count = VALUES(watch_count);
+            """
+            query_mysql(episode_query, (user_id, watch_count, chosen_types_id))
+
+            # Check and fix title watch_count
+            keep_title_watch_count_up_to_date(user_id, title_id=chosen_types_id)
+
+        elif type == "season":
+            episode_query = """
+                INSERT INTO user_episode_details (userID, episode_id, watch_count)
+                SELECT %s, episode_id, %s
+                FROM episodes
+                WHERE season_id = %s
+                ON DUPLICATE KEY UPDATE watch_count = VALUES(watch_count);
+            """
+            query_mysql(episode_query, (user_id, watch_count, chosen_types_id))
+
+            # Check and fix title watch_count
+            keep_title_watch_count_up_to_date(user_id, season_id=chosen_types_id)
+
+        elif type == "episode":
+            episode_query = """
+                INSERT INTO user_episode_details (userID, episode_id, watch_count)
+                VALUES (%s, %s, %s)
+                ON DUPLICATE KEY UPDATE watch_count = VALUES(watch_count)
+            """
+            query_mysql(episode_query, (user_id, chosen_types_id, watch_count))
+
+            # Check and fix title watch_count
+            keep_title_watch_count_up_to_date(user_id, episode_id=chosen_types_id)
+        
+        else:
+            raise HTTPException(status_code=400, detail="Unknown type. Valid values are 'movie', 'tv', 'season', and 'episode'.")
+
+        return {"message": "Watched state updated successfully!"}
+    
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
 @app.get("/watch_list/get_title_cards")
 def get_title_cards(
     session_key: str = Query(...),
-    title_category: str = Query(None, regex="^(Movie|TV)$"),  # Optional filter for category
+    title_type: str = Query(None, regex="^(Movie|TV)$"),  # Optional filter for category
     watched: bool = None,
     title_count: int = None,
     # sort_by: str = None,
@@ -2168,9 +2324,9 @@ def get_title_cards(
     query_params = [user_id]
 
     # Filter by category if provided
-    if title_category:
+    if title_type:
         get_titles_query += " AND t.type = %s"
-        query_params.append(title_category.lower())  # Ensure correct ENUM value
+        query_params.append(title_type.lower())  # Ensure correct ENUM value
 
     # Filter by watched status if provided
     if watched is not None:
@@ -2193,8 +2349,10 @@ def get_title_cards(
     results = query_mysql(get_titles_query, tuple(query_params))
 
     # Format results as objects with relevant fields
-    formatted_results = [
-        {
+    formatted_results = []
+    for row in results:
+        # Base title data to which the rest is added to
+        title_data = {
             "id": row[0],
             "name": row[1],
             "vote_average": row[2],
@@ -2204,12 +2362,41 @@ def get_title_cards(
             "watch_count": row[6],
             "type": row[7],
             "release_date": row[8],
-            # current_episode
-            # current_season_episode_count
-            # current_season
         }
-        for row in results
-    ]
+
+        # Additional data if the title is tv
+        if row[7] == "tv":
+            last_watched_query = """
+                SELECT e.episode_number, s.season_number, s.episode_count
+                FROM user_episode_details ued
+                JOIN episodes e ON ued.episode_id = e.episode_id
+                JOIN seasons s ON e.season_id = s.season_id
+                WHERE ued.userID = %s AND e.title_id = %s AND ued.watch_count > 0
+                ORDER BY s.season_number DESC, e.episode_number DESC
+                LIMIT 1;
+            """
+            last_watched_result = query_mysql(last_watched_query, (user_id, row[0]))
+
+            if last_watched_result:
+                title_data["last_watched_episode"] = last_watched_result[0][0]
+                title_data["last_watched_season"] = last_watched_result[0][1]
+                title_data["last_watched_season_episode_count"] = last_watched_result[0][2]
+            else:
+                first_season_episode_count_query = """
+                    SELECT episode_count 
+                    FROM seasons 
+                    WHERE title_id = %s 
+                        AND season_number = 1 
+                    LIMIT 1
+                """
+                first_season_episode_count_result = query_mysql(first_season_episode_count_query, (row[0],))
+                if first_season_episode_count_result:
+                    title_data["last_watched_episode"] = 0
+                    title_data["last_watched_season"] = 1
+                    title_data["last_watched_season_episode_count"] = first_season_episode_count_result[0][0]
+
+
+        formatted_results.append(title_data)
 
     return {"titles": formatted_results}
 
@@ -2255,7 +2442,7 @@ def get_title_info(
         "movie_runtime": title_query_results[12],
         "release_date": title_query_results[13],
         "title_info_last_updated": title_query_results[14],
-        "user_title_watch_count": title_query_results[15],
+        "user_watch_count": title_query_results[15],
         "user_title_notes": title_query_results[16],
         "user_title_last_updated": title_query_results[17],
         "title_genres": title_query_results[18].split(", ") if title_query_results[18] else []
@@ -2272,12 +2459,26 @@ def get_title_info(
         seasons = query_mysql(get_seasons_query, (title_id,))
 
         get_episodes_query = """
-            SELECT season_id, episode_number, episode_name, vote_average, vote_count, overview, still_url, air_date, runtime
-            FROM episodes
-            WHERE title_id = %s
-            ORDER BY season_id, episode_number
+            SELECT 
+                e.season_id, 
+                e.episode_id, 
+                e.episode_number, 
+                e.episode_name, 
+                e.vote_average, 
+                e.vote_count, 
+                e.overview, 
+                e.still_url, 
+                e.air_date, 
+                e.runtime, 
+                COALESCE(ued.watch_count, 0)
+            FROM episodes e
+            LEFT JOIN user_episode_details ued 
+                ON e.episode_id = ued.episode_id 
+                AND ued.userID = %s
+            WHERE e.title_id = %s
+            ORDER BY e.season_id, e.episode_number;
         """
-        episodes = query_mysql(get_episodes_query, (title_id,))
+        episodes = query_mysql(get_episodes_query, (user_id, title_id))
 
         # Organizing data into seasons with episodes
         season_map = {}
@@ -2299,21 +2500,24 @@ def get_title_info(
             season_id = episode[0]
             if season_id in season_map:
                 season_map[season_id]["episodes"].append({
-                    "episode_number": episode[1],
-                    "episode_name": episode[2],
-                    "vote_average": episode[3],
-                    "vote_count": episode[4],
-                    "overview": episode[5],
-                    "still_url": episode[6],
-                    "air_date": episode[7],
-                    "runtime": episode[8]
+                    "episode_id": episode[1],
+                    "episode_number": episode[2],
+                    "episode_name": episode[3],
+                    "vote_average": episode[4],
+                    "vote_count": episode[5],
+                    "overview": episode[6],
+                    "still_url": episode[7],
+                    "air_date": episode[8],
+                    "runtime": episode[9],
+                    "watch_count": episode[10],
                 })
 
         title_info["seasons"] = list(season_map.values())
     
     return {"title_info": title_info}
 
-# Sort by options for titles listed:
+
+# Sort by options for future "/watch_list/list_titles":
     # Vote average (default)
     # Last watched
     # Alpabetical
