@@ -8,9 +8,7 @@ pip install --upgrade pip
 # pip install asyncmy                   # async mysql-connector. Seems that async doesn't work??
 pip install mysql-connector-python      # only synchronys which seems to work
 
-# - - - - - Drive info - - - - - 
+# - - - - - Other mixed - - - - - 
 pip install psutil
-
 pip install croniter
-
 pip install pandas

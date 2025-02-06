@@ -542,12 +542,18 @@ def query_mysql(query: str, params: tuple = (), fetch_last_row_id=False):
 
 # Function to query the TMDB servers
 def query_tmdb(endpoint: str, params: dict = {}):
-    params["api_key"] = os.getenv("TMDB_API_KEY", "default value if not found")
-    params["language"] = "en-US"
+    headers = {
+        "Authorization": f"Bearer {os.getenv('TMDB_ACCESS_TOKEN', 'default_token')}",
+        "Accept": "application/json"
+    }
+    params["language"] = "en-US"  # No need for 'api_key' in params
+
     print(f"Querying TMDB: {endpoint}")
+    
     with httpx.Client() as client:
-        response = client.get(f"https://api.themoviedb.org/3{endpoint}", params=params)
+        response = client.get(f"https://api.themoviedb.org/3{endpoint}", params=params, headers=headers)
         return response.json() if response.status_code == 200 else {}
+
 
 
 def validateSessionKey(session_key=None, guest_lock=True):
@@ -759,7 +765,7 @@ def edit_transaction(data: dict):
         notes = data.get("notes")
         categories = data.get("categories", [])
         
-        print(date)
+        # print(date)
 
         # Validate required fields
         if not all([transaction_id, direction, date, counterparty, categories]):
@@ -1734,7 +1740,7 @@ def format_time_difference(delta):
 # - - - - - - - TV AND MOVIE WATCH LIST - - - - - - - #
 # - - - - - - - - - - - - - - - - - - - - - - - - - - #
 
-# Used to manually update the genres if they change etc. In the past was ran always on start, but since it ran on all 4 workers the feature was removed.
+# Used to manually update the genres if they change etc. In the past was ran always on start, but since it ran on all 4 workers the feature was removed. Basically only used if I were to wipe the whole db
 @app.get("/watch_list/udpate_genres")
 def fetch_genres():
     # Fetch movie genres
@@ -1822,7 +1828,7 @@ def watch_list_search(
 
 
 # Used for the tvs and movies to add the genres to avoid duplication
-def add_genres_for_title(title_id, tmdb_genres):
+def add_or_update_genres_for_title(title_id, tmdb_genres):
     if not tmdb_genres:
         return  # No genres to process
 
@@ -1831,28 +1837,41 @@ def add_genres_for_title(title_id, tmdb_genres):
         str(genre['id']) for genre in tmdb_genres
     )
     result = query_mysql(genre_query)
-    
+
     # Map TMDB genre ID to local genre ID
     genre_ids = {row[0]: row[1] for row in result}
-    
-    # Insert genre associations into title_genres
+
+    # Remove existing genre associations for this title_id
+    delete_genre_query = "DELETE FROM title_genres WHERE title_id = %s"
+    query_mysql(delete_genre_query, (title_id,))
+
+    # Insert new genre associations into title_genres
     genre_values = ", ".join(f"({title_id}, {genre_ids[genre['id']]})" for genre in tmdb_genres if genre['id'] in genre_ids)
     
     if genre_values:
-        insert_genre_query = "INSERT INTO title_genres (title_id, genre_id) VALUES %s" % genre_values
+        insert_genre_query = f"INSERT INTO title_genres (title_id, genre_id) VALUES {genre_values}"
         query_mysql(insert_genre_query)
 
-def add_movie_title(title_tmdb_id):
+def add_or_update_movie_title(title_tmdb_id):
     try:
         # Get the data from TMDB
         movie_title_info = query_tmdb(f"/movie/{title_tmdb_id}", {})
 
         # Insert the movie into titles
         query = """
-            INSERT INTO titles (tmdb_id, imdb_id, type, title_name, title_name_original, tagline,
-                                vote_average, vote_count, overview, poster_url, backdrop_url,
-                                movie_runtime, release_date)
+            INSERT INTO titles (tmdb_id, imdb_id, type, title_name, title_name_original, tagline, vote_average, vote_count, overview, poster_url, backdrop_url, movie_runtime, release_date)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE 
+                imdb_id = VALUES(imdb_id),
+                title_name = VALUES(title_name),
+                title_name_original = VALUES(title_name_original),
+                tagline = VALUES(tagline),
+                vote_average = VALUES(vote_average),
+                vote_count = VALUES(vote_count),
+                overview = VALUES(overview),
+                poster_url = VALUES(poster_url),
+                backdrop_url = VALUES(backdrop_url),
+                release_date = VALUES(release_date);
         """
         params = (
             movie_title_info.get('id'),
@@ -1869,17 +1888,28 @@ def add_movie_title(title_tmdb_id):
             movie_title_info.get('runtime'),
             movie_title_info.get('release_date')
         )
-        title_id = query_mysql(query, params, True)
+        title_id = query_mysql(query, params, fetch_last_row_id=True)
 
-        # Handle genres using the new function
-        add_genres_for_title(title_id, movie_title_info.get('genres', []))
+        # When updating the fetch_last_row_id returns a 0 for some reason so fetch the id seperately
+        print(title_id)
+        if title_id == 0:
+            title_id_query = """
+                SELECT title_id
+                FROM titles
+                WHERE tmdb_id = %s
+            """
+            title_id = query_mysql(title_id_query, (title_tmdb_id,))[0][0]
+        print(title_id)
+
+        # Handle genres using the seperate function
+        add_or_update_genres_for_title(title_id, movie_title_info.get('genres', []))
         
         return title_id
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-def add_tv_title(title_tmdb_id):
+def add_or_update_tv_title(title_tmdb_id):
     try:
         # Get the data from tmdb
         tv_title_info = query_tmdb(f"/tv/{title_tmdb_id}", {"append_to_response": "external_ids"})
@@ -1887,10 +1917,19 @@ def add_tv_title(title_tmdb_id):
         # - - - TITLE - - - 
         # Insert the tv-series info into titles
         tv_title_query = """
-            INSERT INTO titles (tmdb_id, imdb_id, type, title_name, title_name_original, tagline,
-                                vote_average, vote_count, overview, poster_url, backdrop_url,
-                                movie_runtime, release_date)
+            INSERT INTO titles (tmdb_id, imdb_id, type, title_name, title_name_original, tagline, vote_average, vote_count, overview, poster_url, backdrop_url, movie_runtime, release_date)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE 
+                imdb_id = VALUES(imdb_id),
+                title_name = VALUES(title_name),
+                title_name_original = VALUES(title_name_original),
+                tagline = VALUES(tagline),
+                vote_average = VALUES(vote_average),
+                vote_count = VALUES(vote_count),
+                overview = VALUES(overview),
+                poster_url = VALUES(poster_url),
+                backdrop_url = VALUES(backdrop_url),
+                release_date = VALUES(release_date);
         """
         tv_title_params = (
             tv_title_info.get('id'),
@@ -1909,11 +1948,21 @@ def add_tv_title(title_tmdb_id):
         )
         title_id = query_mysql(tv_title_query, tv_title_params, True)
 
+        # When updating the fetch_last_row_id returns a 0 for some reason so fetch the id seperately
+        print(title_id)
+        if title_id == 0:
+            title_id_query = """
+                SELECT title_id
+                FROM titles
+                WHERE tmdb_id = %s
+            """
+            title_id = query_mysql(title_id_query, (title_tmdb_id,))[0][0]
+        print(title_id)
+
         # Handle genres using the function
-        add_genres_for_title(title_id, tv_title_info.get('genres', []))
+        add_or_update_genres_for_title(title_id, tv_title_info.get('genres', []))
 
         # - - - SEASONS - - - 
-        # Prepare list of tuples for bulk insertion
         tv_seasons_params = []
         for season in tv_title_info.get('seasons', []):
             tv_seasons_params.append((
@@ -1926,15 +1975,22 @@ def add_tv_title(title_tmdb_id):
                 season.get('overview'),
                 season.get('poster_path'),
             ))
+
         if tv_seasons_params:
             placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s)"] * len(tv_seasons_params))
-            query = f"INSERT INTO seasons (title_id, season_number, season_name, vote_average, vote_count, episode_count, overview, poster_url) VALUES {placeholders}"
-            
-            # Flatten the list of tuples into a single tuple
+            query = f"""
+                INSERT INTO seasons (title_id, season_number, season_name, vote_average, vote_count, episode_count, overview, poster_url)
+                VALUES {placeholders}
+                ON DUPLICATE KEY UPDATE
+                    season_name = VALUES(season_name),
+                    vote_average = VALUES(vote_average),
+                    vote_count = VALUES(vote_count),
+                    episode_count = VALUES(episode_count),
+                    overview = VALUES(overview),
+                    poster_url = VALUES(poster_url)
+            """
             flat_values = [item for sublist in tv_seasons_params for item in sublist]
-            
             query_mysql(query, flat_values)
-
 
         # - - - EPISODES - - - 
         # Fetch season IDs from the database
@@ -1968,11 +2024,20 @@ def add_tv_title(title_tmdb_id):
             placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"] * len(tv_episodes_params))
             query = f"""
                 INSERT INTO episodes (season_id, title_id, episode_number, episode_name, vote_average,
-                                      vote_count, overview, still_url, air_date, runtime)
+                                    vote_count, overview, still_url, air_date, runtime)
                 VALUES {placeholders}
+                ON DUPLICATE KEY UPDATE
+                    episode_name = VALUES(episode_name),
+                    vote_average = VALUES(vote_average),
+                    vote_count = VALUES(vote_count),
+                    overview = VALUES(overview),
+                    still_url = VALUES(still_url),
+                    air_date = VALUES(air_date),
+                    runtime = VALUES(runtime)
             """
             flat_values = [item for sublist in tv_episodes_params for item in sublist]
             query_mysql(query, flat_values)
+
 
         # Finally return the title_id for later use
         return title_id
@@ -1985,7 +2050,7 @@ def add_title(data: dict):
     try:
         # Validate the session key
         session_key = data.get("session_key")
-        user_id = validateSessionKey(session_key, False)
+        user_id = validateSessionKey(session_key)
 
         # Check if the title already exists
         title_tmdb_id = data.get("title_tmdb_id")
@@ -2006,9 +2071,9 @@ def add_title(data: dict):
             
             # Based on type store the data
             if title_type == "movie":
-                title_id = add_movie_title(title_tmdb_id)
+                title_id = add_or_update_movie_title(title_tmdb_id)
             elif title_type == "tv":
-                title_id = add_tv_title(title_tmdb_id)
+                title_id = add_or_update_tv_title(title_tmdb_id)
             else:
                 raise HTTPException(status_code=500, detail="Internal server error")
         else:
@@ -2035,12 +2100,30 @@ def add_title(data: dict):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
+@app.post("/watch_list/update_title_info")
+def update_title_info(data: dict):
+    title_type = data.get("title_type")
+    title_tmdb_id = data.get("title_tmdb_id")
+
+    if not title_tmdb_id or not title_type:
+        raise HTTPException(status_code=422, detail="Missing 'title_tmdb_id' or 'title_type'.")
+
+    if title_type == "movie":
+        add_or_update_movie_title(title_tmdb_id)
+    elif title_type == "tv":
+        add_or_update_tv_title(title_tmdb_id)
+    else:
+        raise HTTPException(status_code=422, detail="Invalid 'title_type'. Must be 'movie' or 'tv'.")
+
+    return {"message": "Title information updated successfully."}
+
+
 @app.post("/watch_list/remove_user_title")
 def remove_title(data: dict):
     try:
         # Validate the session key
         session_key = data.get("session_key")
-        user_id = validateSessionKey(session_key, False)
+        user_id = validateSessionKey(session_key)
 
         # Get the TMDB title ID
         title_tmdb_id = data.get("title_tmdb_id")
@@ -2061,3 +2144,178 @@ def remove_title(data: dict):
         raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@app.get("/watch_list/get_title_cards")
+def get_title_cards(
+    session_key: str = Query(...),
+    title_category: str = Query(None, regex="^(Movie|TV)$"),  # Optional filter for category
+    watched: bool = None,
+    title_count: int = None,
+    # sort_by: str = None,
+):
+    # Get user_id and validate session key
+    user_id = validateSessionKey(session_key, False)
+
+    # Base query
+    get_titles_query = """
+        SELECT t.title_id, t.title_name, t.vote_average, t.vote_count, t.poster_url, t.movie_runtime, utd.watch_count, t.type, t.release_date
+        FROM user_title_details utd
+        JOIN titles t ON utd.title_id = t.title_id
+        WHERE utd.userID = %s
+    """
+
+    query_params = [user_id]
+
+    # Filter by category if provided
+    if title_category:
+        get_titles_query += " AND t.type = %s"
+        query_params.append(title_category.lower())  # Ensure correct ENUM value
+
+    # Filter by watched status if provided
+    if watched is not None:
+        if watched == True:
+            get_titles_query += " AND utd.watch_count > 0"
+        else:
+            get_titles_query += " AND utd.watch_count = 0"
+
+    # Add the order after WHERE clause is fully added
+    get_titles_query += " ORDER BY t.vote_average DESC"
+
+    # Add the limit
+    if title_count is None:
+        title_count = 10
+
+    get_titles_query += " LIMIT %s"
+    query_params.append(title_count)
+
+    # Execute query
+    results = query_mysql(get_titles_query, tuple(query_params))
+
+    # Format results as objects with relevant fields
+    formatted_results = [
+        {
+            "id": row[0],
+            "name": row[1],
+            "vote_average": row[2],
+            "vote_count": row[3],
+            "poster_url": row[4],
+            "movie_runtime": row[5],
+            "watch_count": row[6],
+            "type": row[7],
+            "release_date": row[8],
+            # current_episode
+            # current_season_episode_count
+            # current_season
+        }
+        for row in results
+    ]
+
+    return {"titles": formatted_results}
+
+
+@app.get("/watch_list/get_title_info")
+def get_title_info(
+    session_key: str = Query(...),
+    title_id: int = Query(...),
+):
+    # Get user_id and validate session key
+    user_id = validateSessionKey(session_key)
+
+    # Base query
+    get_titles_query = """
+        SELECT 
+            t.*, 
+            utd.watch_count, 
+            utd.notes, 
+            utd.last_updated,
+            GROUP_CONCAT(g.genre_name ORDER BY g.genre_name SEPARATOR ', ') AS genres
+        FROM user_title_details utd
+        JOIN titles t ON utd.title_id = t.title_id
+        LEFT JOIN title_genres tg ON t.title_id = tg.title_id
+        LEFT JOIN genres g ON tg.genre_id = g.genre_id
+        WHERE utd.userID = %s AND utd.title_id = %s
+        GROUP BY t.title_id, utd.watch_count, utd.notes, utd.last_updated;
+    """
+    title_query_results = query_mysql(get_titles_query, (user_id, title_id))[0]
+
+    title_info = {
+        "title_id": title_query_results[0],
+        "tmdb_id": title_query_results[1],
+        "imdb_id": title_query_results[2],
+        "type": title_query_results[3],
+        "name": title_query_results[4],
+        "original_name": title_query_results[5],
+        "tagline": title_query_results[6],
+        "tmdb_vote_average": title_query_results[7],
+        "tmdb_vote_count": title_query_results[8],
+        "overview": title_query_results[9],
+        "poster_url": title_query_results[10],
+        "backdrop_url": title_query_results[11],
+        "movie_runtime": title_query_results[12],
+        "release_date": title_query_results[13],
+        "title_info_last_updated": title_query_results[14],
+        "user_title_watch_count": title_query_results[15],
+        "user_title_notes": title_query_results[16],
+        "user_title_last_updated": title_query_results[17],
+        "title_genres": title_query_results[18].split(", ") if title_query_results[18] else []
+    }
+    
+    # Get the seasons and episodes if it's a TV show
+    if title_query_results[3] == "tv":
+        get_seasons_query = """
+            SELECT season_id, season_number, season_name, vote_average, vote_count, episode_count, overview, poster_url
+            FROM seasons
+            WHERE title_id = %s
+            ORDER BY CASE WHEN season_number = 0 THEN 999 ELSE season_number END
+        """
+        seasons = query_mysql(get_seasons_query, (title_id,))
+
+        get_episodes_query = """
+            SELECT season_id, episode_number, episode_name, vote_average, vote_count, overview, still_url, air_date, runtime
+            FROM episodes
+            WHERE title_id = %s
+            ORDER BY season_id, episode_number
+        """
+        episodes = query_mysql(get_episodes_query, (title_id,))
+
+        # Organizing data into seasons with episodes
+        season_map = {}
+        for season in seasons:
+            season_id = season[0]
+            season_map[season_id] = {
+                "season_id": season_id,
+                "season_number": season[1],
+                "season_name": season[2],
+                "vote_average": season[3],
+                "vote_count": season[4],
+                "episode_count": season[5],
+                "overview": season[6],
+                "poster_url": season[7],
+                "episodes": []
+            }
+
+        for episode in episodes:
+            season_id = episode[0]
+            if season_id in season_map:
+                season_map[season_id]["episodes"].append({
+                    "episode_number": episode[1],
+                    "episode_name": episode[2],
+                    "vote_average": episode[3],
+                    "vote_count": episode[4],
+                    "overview": episode[5],
+                    "still_url": episode[6],
+                    "air_date": episode[7],
+                    "runtime": episode[8]
+                })
+
+        title_info["seasons"] = list(season_map.values())
+    
+    return {"title_info": title_info}
+
+# Sort by options for titles listed:
+    # Vote average (default)
+    # Last watched
+    # Alpabetical
+    # Popularity (amount of votes)
+    # Duration / Episode Count
