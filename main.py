@@ -1,19 +1,19 @@
-from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse
 import mysql.connector
 from datetime import datetime, timedelta, date
-import time
 import random
 import string
 import calendar
 import os
 import psutil
-from croniter import croniter
 from zoneinfo import ZoneInfo
 from collections import defaultdict
 import pandas as pd
 import httpx
+from pathlib import Path
+import asyncio
 
 app = FastAPI()
 
@@ -555,6 +555,26 @@ def query_tmdb(endpoint: str, params: dict = {}):
     with httpx.Client() as client:
         response = client.get(f"https://api.themoviedb.org/3{endpoint}", params=params, headers=headers)
         return response.json() if response.status_code == 200 else {}
+
+
+# Download an image from an url, semaphore to limit the amount of async tasks.
+async def download_image(image_url: str, image_save_path: str):
+    try:
+        async with httpx.AsyncClient(timeout=None) as client:
+            response = await client.get(image_url)
+
+        if response.status_code == 200:
+            # Saving part is unlimited, no semaphore needed here
+            with open(image_save_path, 'wb') as f:
+                f.write(response.content)
+            print(f"Image saved at {image_save_path}")
+        else:
+            raise HTTPException(status_code=response.status_code, detail="Failed to download image")
+
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail="Failed to fetch image")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # Used to validate the sesion key
@@ -1831,6 +1851,121 @@ def watch_list_search(
     return search_results
 
 
+# Used to get the images for a title and only the title. Doesn't include season or episodes
+async def store_title_images(movie_images, title_id: str):
+    try:
+        base_path = f'/fastapi-images/{title_id}'
+        Path(base_path).mkdir(parents=True, exist_ok=True)
+
+        tasks = []
+
+        # Get the first logo
+        if 'logos' in movie_images:
+            logo = movie_images['logos'][:1]  # Get only the first logo
+            for idx, image in enumerate(logo):
+                image_url = f"https://image.tmdb.org/t/p/original{image['file_path']}"
+                file_extension = image['file_path'].split('.')[-1]
+                image_filename = f"logo.{file_extension}"
+                image_save_path = os.path.join(base_path, image_filename)
+                tasks.append(download_image(image_url, image_save_path))
+
+        # Get the first poster
+        if 'posters' in movie_images:
+            poster = movie_images['posters'][:1]  # Get only the first poster
+            for idx, image in enumerate(poster):
+                image_url = f"https://image.tmdb.org/t/p/original{image['file_path']}"
+                file_extension = image['file_path'].split('.')[-1]
+                image_filename = f"poster.{file_extension}"
+                image_save_path = os.path.join(base_path, image_filename)
+                tasks.append(download_image(image_url, image_save_path))
+
+        # Get the first 5 backdrops
+        if 'backdrops' in movie_images:
+            backdrops = movie_images['backdrops'][:5]  # Get the first 5 backdrops
+            for idx, image in enumerate(backdrops):
+                image_url = f"https://image.tmdb.org/t/p/original{image['file_path']}"
+                file_extension = image['file_path'].split('.')[-1]
+                image_filename = f"backdrop{idx + 1}.{file_extension}"
+                image_save_path = os.path.join(base_path, image_filename)
+                tasks.append(download_image(image_url, image_save_path))
+
+        # Run all the download tasks concurrently
+        await asyncio.gather(*tasks)
+
+        return {"success": True}
+
+    except Exception as e:
+        print(f"store_title_images error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+async def store_season_images(tv_seasons, title_id: str):
+    try:
+        tasks = []
+
+        for season in tv_seasons:
+            season_number = season.get("season_number")
+            poster_path = season.get("poster_path")
+
+            if not poster_path:  # Skip if no poster exists
+                continue
+
+            # Define base path for season
+            season_path = f'/fastapi-images/{title_id}/season{season_number}'
+            Path(season_path).mkdir(parents=True, exist_ok=True)
+
+            # Construct image URL & save path
+            image_url = f"https://image.tmdb.org/t/p/original{poster_path}"
+            file_extension = poster_path.split('.')[-1]
+            image_filename = f"poster.{file_extension}"
+            image_save_path = os.path.join(season_path, image_filename)
+
+            # Add download task
+            tasks.append(download_image(image_url, image_save_path))
+
+        # Run all the download tasks concurrently
+        await asyncio.gather(*tasks)
+
+        return {"success": True}
+
+    except Exception as e:
+        print(f"store_season_images error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+async def store_episode_images(tv_episodes, title_id: str):
+    try:
+        tasks = []
+
+        for episode in tv_episodes:
+            season_number = episode.get("season_number")
+            episode_number = episode.get("episode_number")
+            still_path = episode.get("still_path")
+
+            if not still_path:  # Skip if no still image exists
+                continue
+
+            # Define base path for the episode image
+            episode_path = f'/fastapi-images/{title_id}/season{season_number}'
+            Path(episode_path).mkdir(parents=True, exist_ok=True)
+
+            # Construct image URL & save path
+            image_url = f"https://image.tmdb.org/t/p/original{still_path}"
+            file_extension = still_path.split('.')[-1]
+            image_filename = f"episode{episode_number}.{file_extension}"
+            image_save_path = os.path.join(episode_path, image_filename)
+
+            # Add download task
+            tasks.append(download_image(image_url, image_save_path))
+
+        # Run all the download tasks concurrently
+        await asyncio.gather(*tasks)
+
+        return {"success": True}
+
+    except Exception as e:
+        print(f"store_episode_images error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
 # Used for the tvs and movies to add the genres to avoid duplication
 def add_or_update_genres_for_title(title_id, tmdb_genres):
     if not tmdb_genres:
@@ -1856,10 +1991,10 @@ def add_or_update_genres_for_title(title_id, tmdb_genres):
         insert_genre_query = f"INSERT INTO title_genres (title_id, genre_id) VALUES {genre_values}"
         query_mysql(insert_genre_query)
 
-def add_or_update_movie_title(title_tmdb_id):
+async def add_or_update_movie_title(title_tmdb_id):
     try:
         # Get the data from TMDB
-        movie_title_info = query_tmdb(f"/movie/{title_tmdb_id}", {})
+        movie_title_info = query_tmdb(f"/movie/{title_tmdb_id}", {"append_to_response": "images", "include_image_language": "en,null"})
 
         # Insert the movie into titles
         query = """
@@ -1895,15 +2030,17 @@ def add_or_update_movie_title(title_tmdb_id):
         title_id = query_mysql(query, params, fetch_last_row_id=True)
 
         # When updating the fetch_last_row_id returns a 0 for some reason so fetch the id seperately
-        print(title_id)
         if title_id == 0:
+            print("Need to fetch the title_id seperately")
             title_id_query = """
                 SELECT title_id
                 FROM titles
                 WHERE tmdb_id = %s
             """
             title_id = query_mysql(title_id_query, (title_tmdb_id,))[0][0]
-        print(title_id)
+
+        # Store the title related images
+        await store_title_images(movie_title_info.get('images'), title_id)
 
         # Handle genres using the seperate function
         add_or_update_genres_for_title(title_id, movie_title_info.get('genres', []))
@@ -1913,10 +2050,10 @@ def add_or_update_movie_title(title_tmdb_id):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-def add_or_update_tv_title(title_tmdb_id):
+async def add_or_update_tv_title(title_tmdb_id):
     try:
         # Get the data from tmdb
-        tv_title_info = query_tmdb(f"/tv/{title_tmdb_id}", {"append_to_response": "external_ids"})
+        tv_title_info = query_tmdb(f"/tv/{title_tmdb_id}", {"append_to_response": "external_ids,images", "include_image_language": "en,null"})
 
         # - - - TITLE - - - 
         # Insert the tv-series info into titles
@@ -1954,6 +2091,7 @@ def add_or_update_tv_title(title_tmdb_id):
 
         # When updating the fetch_last_row_id returns a 0 sometimes for some reason so fetch the id seperately
         if title_id == 0:
+            print("Need to fetch the title_id seperately")
             title_id_query = """
                 SELECT title_id
                 FROM titles
@@ -1961,14 +2099,24 @@ def add_or_update_tv_title(title_tmdb_id):
             """
             title_id = query_mysql(title_id_query, (title_tmdb_id,))[0][0]
 
+        # Store the title related images
+        await store_title_images(tv_title_info.get('images'), title_id)
+
         # Handle genres using the function
         add_or_update_genres_for_title(title_id, tv_title_info.get('genres', []))
 
         # - - - SEASONS - - - 
         tv_seasons_params = []
+        season_images_data = {
+            "title_id": title_id,
+            "seasons": []
+        }
+
         for season in tv_title_info.get('seasons', []):
             if season.get('season_number') == 0:  # Skip season 0 (specials)
                 continue
+            
+            # Add season data for MySQL insert
             tv_seasons_params.append((
                 title_id,
                 season.get('season_number'),
@@ -1980,6 +2128,15 @@ def add_or_update_tv_title(title_tmdb_id):
                 season.get('poster_path'),
             ))
 
+            # Add season poster data for image storage
+            if season.get("poster_path"):  # Only add if poster exists
+                season_images_data = [
+                    {"season_number": season["season_number"], "poster_path": season["poster_path"]}
+                    for season in tv_title_info.get("seasons", [])
+                    if season.get("poster_path")  # Only include valid posters
+                ]
+
+        # Insert into the database if there are valid seasons
         if tv_seasons_params:
             placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s)"] * len(tv_seasons_params))
             query = f"""
@@ -1996,6 +2153,9 @@ def add_or_update_tv_title(title_tmdb_id):
             flat_values = [item for sublist in tv_seasons_params for item in sublist]
             query_mysql(query, flat_values)
 
+        # Store season images after database insert
+        await store_season_images(season_images_data, title_id)
+
         # - - - EPISODES - - - 
         # Fetch season IDs from the database
         season_id_query = "SELECT season_id, season_number FROM seasons WHERE title_id = %s"
@@ -2003,6 +2163,8 @@ def add_or_update_tv_title(title_tmdb_id):
 
         # Prepare list of tuples for bulk insertion
         tv_episodes_params = []
+        episode_images_data = []
+
         for season in tv_title_info.get("seasons", []):
             season_number = season.get("season_number")
             season_id = season_id_map.get(season_number)  # Get correct season_id
@@ -2024,6 +2186,14 @@ def add_or_update_tv_title(title_tmdb_id):
                         episode.get("runtime")
                     ))
 
+                    # Collect episode images for downloading
+                    if episode.get("still_path"):
+                        episode_images_data.append({
+                            "season_number": season_number,
+                            "episode_number": episode.get("episode_number"),
+                            "still_path": episode.get("still_path")
+                        })
+
         if tv_episodes_params:
             placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"] * len(tv_episodes_params))
             query = f"""
@@ -2042,6 +2212,8 @@ def add_or_update_tv_title(title_tmdb_id):
             flat_values = [item for sublist in tv_episodes_params for item in sublist]
             query_mysql(query, flat_values)
 
+        # Store episode images after database insert
+        await store_episode_images(episode_images_data, title_id)
 
         # Finally return the title_id for later use
         return title_id
@@ -2050,7 +2222,7 @@ def add_or_update_tv_title(title_tmdb_id):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.post("/watch_list/add_user_title")
-def add_title(data: dict):
+async def add_title(data: dict):
     try:
         # Validate the session key
         session_key = data.get("session_key")
@@ -2075,9 +2247,9 @@ def add_title(data: dict):
             
             # Based on type store the data
             if title_type == "movie":
-                title_id = add_or_update_movie_title(title_tmdb_id)
+                title_id = await add_or_update_movie_title(title_tmdb_id)
             elif title_type == "tv":
-                title_id = add_or_update_tv_title(title_tmdb_id)
+                title_id = await add_or_update_tv_title(title_tmdb_id)
             else:
                 raise HTTPException(status_code=500, detail="Internal server error")
         else:
@@ -2105,7 +2277,7 @@ def add_title(data: dict):
 
 
 @app.post("/watch_list/update_title_info")
-def update_title_info(data: dict):
+async def update_title_info(data: dict):
     title_type = data.get("title_type")
     title_tmdb_id = data.get("title_tmdb_id")
 
@@ -2113,9 +2285,9 @@ def update_title_info(data: dict):
         raise HTTPException(status_code=422, detail="Missing 'title_tmdb_id' or 'title_type'.")
 
     if title_type == "movie":
-        add_or_update_movie_title(title_tmdb_id)
+        await add_or_update_movie_title(title_tmdb_id)
     elif title_type == "tv":
-        add_or_update_tv_title(title_tmdb_id)
+        await add_or_update_tv_title(title_tmdb_id)
     else:
         raise HTTPException(status_code=422, detail="Invalid 'title_type'. Must be 'movie' or 'tv'.")
 
@@ -2315,10 +2487,24 @@ def get_title_cards(
 
     # Base query
     get_titles_query = """
-        SELECT t.title_id, t.title_name, t.vote_average, t.vote_count, t.poster_url, t.movie_runtime, utd.watch_count, t.type, t.release_date
-        FROM user_title_details utd
-        JOIN titles t ON utd.title_id = t.title_id
-        WHERE utd.userID = %s
+        SELECT 
+            t.title_id, 
+            t.title_name, 
+            t.vote_average, 
+            t.vote_count, 
+            t.poster_url, 
+            t.movie_runtime, 
+            utd.watch_count, 
+            t.type, 
+            t.release_date,
+            (SELECT COUNT(season_id) FROM seasons WHERE title_id = t.title_id) AS season_count,
+            (SELECT COUNT(episode_id) FROM episodes WHERE title_id = t.title_id) AS episode_count
+        FROM 
+            user_title_details utd
+        JOIN 
+            titles t ON utd.title_id = t.title_id
+        WHERE 
+            utd.userID = %s
     """
 
     query_params = [user_id]
@@ -2362,39 +2548,40 @@ def get_title_cards(
             "watch_count": row[6],
             "type": row[7],
             "release_date": row[8],
+            "season_count": row[9],
+            "episode_count": row[10],
         }
 
         # Additional data if the title is tv
-        if row[7] == "tv":
-            last_watched_query = """
-                SELECT e.episode_number, s.season_number, s.episode_count
-                FROM user_episode_details ued
-                JOIN episodes e ON ued.episode_id = e.episode_id
-                JOIN seasons s ON e.season_id = s.season_id
-                WHERE ued.userID = %s AND e.title_id = %s AND ued.watch_count > 0
-                ORDER BY s.season_number DESC, e.episode_number DESC
-                LIMIT 1;
-            """
-            last_watched_result = query_mysql(last_watched_query, (user_id, row[0]))
+        # if row[7] == "tv":
+        #     last_watched_query = """
+        #         SELECT e.episode_number, s.season_number, s.episode_count
+        #         FROM user_episode_details ued
+        #         JOIN episodes e ON ued.episode_id = e.episode_id
+        #         JOIN seasons s ON e.season_id = s.season_id
+        #         WHERE ued.userID = %s AND e.title_id = %s AND ued.watch_count > 0
+        #         ORDER BY s.season_number DESC, e.episode_number DESC
+        #         LIMIT 1;
+        #     """
+        #     last_watched_result = query_mysql(last_watched_query, (user_id, row[0]))
 
-            if last_watched_result:
-                title_data["last_watched_episode"] = last_watched_result[0][0]
-                title_data["last_watched_season"] = last_watched_result[0][1]
-                title_data["last_watched_season_episode_count"] = last_watched_result[0][2]
-            else:
-                first_season_episode_count_query = """
-                    SELECT episode_count 
-                    FROM seasons 
-                    WHERE title_id = %s 
-                        AND season_number = 1 
-                    LIMIT 1
-                """
-                first_season_episode_count_result = query_mysql(first_season_episode_count_query, (row[0],))
-                if first_season_episode_count_result:
-                    title_data["last_watched_episode"] = 0
-                    title_data["last_watched_season"] = 1
-                    title_data["last_watched_season_episode_count"] = first_season_episode_count_result[0][0]
-
+        #     if last_watched_result:
+        #         title_data["last_watched_episode"] = last_watched_result[0][0]
+        #         title_data["last_watched_season"] = last_watched_result[0][1]
+        #         title_data["last_watched_season_episode_count"] = last_watched_result[0][2]
+        #     else:
+        #         first_season_episode_count_query = """
+        #             SELECT episode_count 
+        #             FROM seasons 
+        #             WHERE title_id = %s 
+        #                 AND season_number = 1 
+        #             LIMIT 1
+        #         """
+        #         first_season_episode_count_result = query_mysql(first_season_episode_count_query, (row[0],))
+        #         if first_season_episode_count_result:
+        #             title_data["last_watched_episode"] = 0
+        #             title_data["last_watched_season"] = 1
+        #             title_data["last_watched_season_episode_count"] = first_season_episode_count_result[0][0]
 
         formatted_results.append(title_data)
 
@@ -2517,9 +2704,40 @@ def get_title_info(
     return {"title_info": title_info}
 
 
+@app.get("/image/{title_id}/{image_type}/{image_number}")
+@app.head("/image/{title_id}/{image_type}/{image_number}")  # HEAD for checking if image exists
+async def get_image(title_id: str, image_type: str, image_number: str = "1"):
+    # Check image type and set valid file type
+    if image_type in ["poster", "backdrop"]:
+        file_type = ".jpg"
+    elif image_type == "logo":
+        file_type = ".png"
+    else:
+        raise HTTPException(status_code=400, detail=f"Invalid image_type")
+
+    # Define the path where the images are stored
+    if image_type in ["poster", "logo"]:  # If it's poster or logo, no need for image_number
+        image_path = f"/fastapi-images/{title_id}/{image_type}{file_type}"
+    else:
+        # For backdrops, use the image number
+        image_path = f"/fastapi-images/{title_id}/{image_type}{image_number}{file_type}"
+
+    # Check if the image exists
+    if os.path.exists(image_path):
+        if "head" in str(get_image.__name__).lower():  # Check if it's a HEAD request
+            return {"message": "Image exists"}
+        return FileResponse(image_path)
+    else:
+        raise HTTPException(status_code=404, detail=f"Image doesn't exist.")
+
+
+
 # Sort by options for future "/watch_list/list_titles":
     # Vote average (default)
     # Last watched
     # Alpabetical
     # Popularity (amount of votes)
     # Duration / Episode Count
+
+# When updating watch count query the values for the title inside the updating endpoint and return them. 
+
