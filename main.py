@@ -560,6 +560,11 @@ def query_tmdb(endpoint: str, params: dict = {}):
 # Download an image from an url, semaphore to limit the amount of async tasks.
 async def download_image(image_url: str, image_save_path: str):
     try:
+        # Skip download if file already exists
+        if os.path.exists(image_save_path):
+            print(f"Image already exists: {image_save_path}, skipping download.")
+            return
+
         async with httpx.AsyncClient(timeout=None) as client:
             response = await client.get(image_url)
 
@@ -575,6 +580,7 @@ async def download_image(image_url: str, image_save_path: str):
         raise HTTPException(status_code=e.response.status_code, detail="Failed to fetch image")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 # Used to validate the sesion key
@@ -1906,7 +1912,7 @@ async def store_season_images(tv_seasons, title_id: str):
             season_number = season.get("season_number")
             poster_path = season.get("poster_path")
 
-            if not poster_path:  # Skip if no poster exists
+            if not poster_path or season_number == 0:  # Skip if no poster exists or if specials
                 continue
 
             # Define base path for season
@@ -1964,7 +1970,6 @@ async def store_episode_images(tv_episodes, title_id: str):
     except Exception as e:
         print(f"store_episode_images error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
 
 # Used for the tvs and movies to add the genres to avoid duplication
 def add_or_update_genres_for_title(title_id, tmdb_genres):
@@ -2040,7 +2045,7 @@ async def add_or_update_movie_title(title_tmdb_id):
             title_id = query_mysql(title_id_query, (title_tmdb_id,))[0][0]
 
         # Store the title related images
-        await store_title_images(movie_title_info.get('images'), title_id)
+        asyncio.create_task(store_title_images(movie_title_info.get('images'), title_id))
 
         # Handle genres using the seperate function
         add_or_update_genres_for_title(title_id, movie_title_info.get('genres', []))
@@ -2099,8 +2104,8 @@ async def add_or_update_tv_title(title_tmdb_id):
             """
             title_id = query_mysql(title_id_query, (title_tmdb_id,))[0][0]
 
-        # Store the title related images
-        await store_title_images(tv_title_info.get('images'), title_id)
+        # Setup the title images to download in the background
+        asyncio.create_task(store_title_images(tv_title_info.get('images'), title_id))
 
         # Handle genres using the function
         add_or_update_genres_for_title(title_id, tv_title_info.get('genres', []))
@@ -2153,8 +2158,8 @@ async def add_or_update_tv_title(title_tmdb_id):
             flat_values = [item for sublist in tv_seasons_params for item in sublist]
             query_mysql(query, flat_values)
 
-        # Store season images after database insert
-        await store_season_images(season_images_data, title_id)
+        # Setup the season images to download in the background
+        asyncio.create_task(store_season_images(season_images_data, title_id))
 
         # - - - EPISODES - - - 
         # Fetch season IDs from the database
@@ -2212,8 +2217,8 @@ async def add_or_update_tv_title(title_tmdb_id):
             flat_values = [item for sublist in tv_episodes_params for item in sublist]
             query_mysql(query, flat_values)
 
-        # Store episode images after database insert
-        await store_episode_images(episode_images_data, title_id)
+        # Setup the episode images to download in the background
+        asyncio.create_task(store_episode_images(episode_images_data, title_id))
 
         # Finally return the title_id for later use
         return title_id
@@ -2314,6 +2319,17 @@ def remove_title(data: dict):
         """
         query_mysql(remove_query, (user_id, title_tmdb_id))
 
+        # Remove related episodes from user's episode details
+        remove_episodes_query = """
+            DELETE user_episode_details
+            FROM user_episode_details
+            JOIN episodes ON user_episode_details.episode_id = episodes.episode_id
+            WHERE user_episode_details.userID = %s AND episodes.title_id = (
+                SELECT title_id FROM titles WHERE tmdb_id = %s
+            )
+        """
+        query_mysql(remove_episodes_query, (user_id, title_tmdb_id))
+
         return {"success": True}
     
     except HTTPException as e:
@@ -2351,27 +2367,34 @@ def save_user_title_notes(data: dict):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
+def convert_season_or_episode_id_to_title_id(season_id=None, episode_id=None):
+    if season_id:
+        # Get the title_id from the season_id
+        get_title_id_query = """
+            SELECT title_id
+            FROM seasons
+            WHERE season_id = %s
+        """
+        result = query_mysql(get_title_id_query, (season_id,))
+        title_id = result[0][0] if result else None
+    elif episode_id:
+        # Get the title_id from the episode_id
+        get_title_id_query = """
+            SELECT title_id
+            FROM episodes
+            WHERE episode_id = %s
+        """
+        result = query_mysql(get_title_id_query, (episode_id,))
+        title_id = result[0][0] if result else None
+    else:
+        title_id = None
+
+    return title_id
+
 def keep_title_watch_count_up_to_date(user_id, title_id=None, season_id=None, episode_id=None):
     # If we don't have title_id, get it from season_id or episode_id
     if not title_id:
-        if season_id:
-            # Get the title_id from the season_id
-            get_title_id_query = """
-                SELECT title_id
-                FROM seasons
-                WHERE season_id = %s
-            """
-            result = query_mysql(get_title_id_query, (season_id,))
-            title_id = result[0][0] if result else None
-        elif episode_id:
-            # Get the title_id from the episode_id
-            get_title_id_query = """
-                SELECT title_id
-                FROM episodes
-                WHERE episode_id = %s
-            """
-            result = query_mysql(get_title_id_query, (episode_id,))
-            title_id = result[0][0] if result else None
+        title_id = convert_season_or_episode_id_to_title_id(season_id, episode_id)
 
     # If we have the title_id, proceed with checking episodes
     if title_id:
@@ -2394,6 +2417,45 @@ def keep_title_watch_count_up_to_date(user_id, title_id=None, season_id=None, ep
             ON DUPLICATE KEY UPDATE watch_count = %s
         """
         query_mysql(update_title_watch_count_query, (user_id, title_id, 1 if all_watched else 0, 1 if all_watched else 0))
+
+def get_updated_user_title_data(user_id: int, title_id: int):
+    try:
+        result = {}
+
+        # Query for title's watch_count (for movie or TV show)
+        title_query = """
+            SELECT utd.watch_count
+            FROM user_title_details utd
+            WHERE utd.userID = %s AND utd.title_id = %s
+        """
+        title_info = query_mysql(title_query, (user_id, title_id))
+
+        if title_info:
+            result["title_id"] = title_id
+            result["watch_count"] = title_info[0][0]
+
+            # Query for episodes if it's a TV show
+            episode_query = """
+                SELECT e.episode_id, e.episode_name, ued.watch_count
+                FROM episodes e
+                LEFT JOIN user_episode_details ued 
+                    ON e.episode_id = ued.episode_id AND ued.userID = %s
+                WHERE e.title_id = %s
+            """
+            episode_info = query_mysql(episode_query, (user_id, title_id))
+            result["episodes"] = [
+                {
+                    "episode_id": episode[0],
+                    "episode_name": episode[1],
+                    "watch_count": episode[2]
+                }
+                for episode in episode_info
+            ]
+        return result
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching updated data: {str(e)}")
+
 
 @app.post("/watch_list/modify_title_watch_count")
 def modify_title_watch_count(data: dict):
@@ -2465,8 +2527,21 @@ def modify_title_watch_count(data: dict):
         
         else:
             raise HTTPException(status_code=400, detail="Unknown type. Valid values are 'movie', 'tv', 'season', and 'episode'.")
+        
+        # Get the title_id for the updated data
+        if type == "episode":
+            title_id = convert_season_or_episode_id_to_title_id(episode_id=chosen_types_id)
+        elif type == "season":
+            title_id = convert_season_or_episode_id_to_title_id(season_id=chosen_types_id)
+        else:
+            title_id = chosen_types_id
+        
+        updated_data = get_updated_user_title_data(user_id, title_id)
 
-        return {"message": "Watched state updated successfully!"}
+        return {
+            "message": "Watched state updated successfully!",
+            "updated_data": updated_data
+        }
     
     except HTTPException as e:
         raise e
@@ -2588,55 +2663,119 @@ def get_title_cards(
     return {"titles": formatted_results}
 
 
+def get_backdrop_count(title_id: int):
+    # Path base
+    base_path = "/fastapi-images"
+    
+    # Count of backdrops that exist
+    count = 0
+
+    # Loop through the backdrops from 1 to 5
+    for i in range(1, 6):
+        image_path = os.path.join(base_path, str(title_id), f"backdrop{i}.jpg")
+        
+        # Check if the image exists
+        if os.path.exists(image_path):
+            count += 1
+
+    return count
+
 @app.get("/watch_list/get_title_info")
 def get_title_info(
     session_key: str = Query(...),
     title_id: int = Query(...),
 ):
     # Get user_id and validate session key
-    user_id = validateSessionKey(session_key)
+    user_id = validateSessionKey(session_key, False)
 
-    # Base query
-    get_titles_query = """
-        SELECT 
-            t.*, 
-            utd.watch_count, 
-            utd.notes, 
-            utd.last_updated,
-            GROUP_CONCAT(g.genre_name ORDER BY g.genre_name SEPARATOR ', ') AS genres
-        FROM user_title_details utd
-        JOIN titles t ON utd.title_id = t.title_id
-        LEFT JOIN title_genres tg ON t.title_id = tg.title_id
-        LEFT JOIN genres g ON tg.genre_id = g.genre_id
-        WHERE utd.userID = %s AND utd.title_id = %s
-        GROUP BY t.title_id, utd.watch_count, utd.notes, utd.last_updated;
+    # Check if user has added the title to their watchlist
+    check_watchlist_query = """
+        SELECT 1
+        FROM user_title_details
+        WHERE userID = %s AND title_id = %s
     """
-    title_query_results = query_mysql(get_titles_query, (user_id, title_id))[0]
+    watchlist_exists = query_mysql(check_watchlist_query, (user_id, title_id))
 
-    title_info = {
-        "title_id": title_query_results[0],
-        "tmdb_id": title_query_results[1],
-        "imdb_id": title_query_results[2],
-        "type": title_query_results[3],
-        "name": title_query_results[4],
-        "original_name": title_query_results[5],
-        "tagline": title_query_results[6],
-        "tmdb_vote_average": title_query_results[7],
-        "tmdb_vote_count": title_query_results[8],
-        "overview": title_query_results[9],
-        "poster_url": title_query_results[10],
-        "backdrop_url": title_query_results[11],
-        "movie_runtime": title_query_results[12],
-        "release_date": title_query_results[13],
-        "title_info_last_updated": title_query_results[14],
-        "user_watch_count": title_query_results[15],
-        "user_title_notes": title_query_results[16],
-        "user_title_last_updated": title_query_results[17],
-        "title_genres": title_query_results[18].split(", ") if title_query_results[18] else []
-    }
-    
+    if watchlist_exists:
+        # Base query for when title is in user's watchlist
+        get_titles_query = """
+            SELECT 
+                t.*, 
+                utd.watch_count, 
+                utd.notes, 
+                utd.last_updated,
+                GROUP_CONCAT(g.genre_name ORDER BY g.genre_name SEPARATOR ', ') AS genres
+            FROM user_title_details utd
+            JOIN titles t ON utd.title_id = t.title_id
+            LEFT JOIN title_genres tg ON t.title_id = tg.title_id
+            LEFT JOIN genres g ON tg.genre_id = g.genre_id
+            WHERE utd.userID = %s AND utd.title_id = %s
+            GROUP BY t.title_id, utd.watch_count, utd.notes, utd.last_updated;
+        """
+        title_query_results = query_mysql(get_titles_query, (user_id, title_id))[0]
+
+        title_info = {
+            "title_id": title_query_results[0],
+            "tmdb_id": title_query_results[1],
+            "imdb_id": title_query_results[2],
+            "type": title_query_results[3],
+            "name": title_query_results[4],
+            "original_name": title_query_results[5],
+            "tagline": title_query_results[6],
+            "tmdb_vote_average": title_query_results[7],
+            "tmdb_vote_count": title_query_results[8],
+            "overview": title_query_results[9],
+            "poster_url": title_query_results[10],
+            "backdrop_url": title_query_results[11],
+            "movie_runtime": title_query_results[12],
+            "release_date": title_query_results[13],
+            "title_info_last_updated": title_query_results[14],
+            "user_watch_count": title_query_results[15],
+            "user_title_notes": title_query_results[16],
+            "user_title_last_updated": title_query_results[17],
+            "title_genres": title_query_results[18].split(", ") if title_query_results[18] else [],
+            "backdrop_image_count": get_backdrop_count(title_query_results[0])
+        }
+    else:
+        # Base query for when title is NOT in user's watchlist
+        get_titles_query_not_on_list = """
+            SELECT 
+                t.*, 
+                GROUP_CONCAT(g.genre_name ORDER BY g.genre_name SEPARATOR ', ') AS genres
+            FROM titles t
+            LEFT JOIN title_genres tg ON t.title_id = tg.title_id
+            LEFT JOIN genres g ON tg.genre_id = g.genre_id
+            WHERE t.title_id = %s
+            GROUP BY t.title_id;
+        """
+        title_query_results_not_on_list = query_mysql(get_titles_query_not_on_list, (title_id,))[0]
+        print(title_query_results_not_on_list)
+
+        title_info = {
+            "title_id": title_query_results_not_on_list[0],
+            "tmdb_id": title_query_results_not_on_list[1],
+            "imdb_id": title_query_results_not_on_list[2],
+            "type": title_query_results_not_on_list[3],
+            "name": title_query_results_not_on_list[4],
+            "original_name": title_query_results_not_on_list[5],
+            "tagline": title_query_results_not_on_list[6],
+            "tmdb_vote_average": title_query_results_not_on_list[7],
+            "tmdb_vote_count": title_query_results_not_on_list[8],
+            "overview": title_query_results_not_on_list[9],
+            "poster_url": title_query_results_not_on_list[10],
+            "backdrop_url": title_query_results_not_on_list[11],
+            "movie_runtime": title_query_results_not_on_list[12],
+            "release_date": title_query_results_not_on_list[13],
+            "title_info_last_updated": title_query_results_not_on_list[14],
+            "user_watch_count": -1,
+            "user_title_notes": None,
+            "user_title_last_updated": None,
+            "title_genres": title_query_results_not_on_list[15].split(", ") if title_query_results_not_on_list[15] else [],
+            "backdrop_image_count": get_backdrop_count(title_query_results_not_on_list[0])
+        }
+
     # Get the seasons and episodes if it's a TV show
-    if title_query_results[3] == "tv":
+    if title_info["type"] == "tv":
         get_seasons_query = """
             SELECT season_id, season_number, season_name, vote_average, vote_count, episode_count, overview, poster_url
             FROM seasons
@@ -2700,35 +2839,25 @@ def get_title_info(
                 })
 
         title_info["seasons"] = list(season_map.values())
-    
+
     return {"title_info": title_info}
 
 
-@app.get("/image/{title_id}/{image_type}/{image_number}")
-@app.head("/image/{title_id}/{image_type}/{image_number}")  # HEAD for checking if image exists
-async def get_image(title_id: str, image_type: str, image_number: str = "1"):
-    # Check image type and set valid file type
-    if image_type in ["poster", "backdrop"]:
-        file_type = ".jpg"
-    elif image_type == "logo":
-        file_type = ".png"
-    else:
-        raise HTTPException(status_code=400, detail=f"Invalid image_type")
-
-    # Define the path where the images are stored
-    if image_type in ["poster", "logo"]:  # If it's poster or logo, no need for image_number
-        image_path = f"/fastapi-images/{title_id}/{image_type}{file_type}"
-    else:
-        # For backdrops, use the image number
-        image_path = f"/fastapi-images/{title_id}/{image_type}{image_number}{file_type}"
+@app.get("/image/{image_path:path}")
+@app.head("/image/{image_path:path}")  # HEAD for checking if image exists
+async def get_image(image_path: str):
+    # Define the full image path
+    full_path = os.path.join("/fastapi-images", image_path)
 
     # Check if the image exists
-    if os.path.exists(image_path):
-        if "head" in str(get_image.__name__).lower():  # Check if it's a HEAD request
+    if os.path.exists(full_path):
+        # If head just reutrn that it does
+        if "head" in str(get_image.__name__).lower():  # HEAD request check
             return {"message": "Image exists"}
-        return FileResponse(image_path)
+        # Else return the whole image
+        return FileResponse(full_path)
     else:
-        raise HTTPException(status_code=404, detail=f"Image doesn't exist.")
+        raise HTTPException(status_code=404, detail="Image doesn't exist.")
 
 
 
