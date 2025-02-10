@@ -14,6 +14,7 @@ import pandas as pd
 import httpx
 from pathlib import Path
 import asyncio
+from collections import OrderedDict
 
 app = FastAPI()
 
@@ -24,468 +25,9 @@ app.add_middleware(
     allow_headers=["*"],      # Allow all headers
 )
 
-# - - - - - - - - - - - - - -  - - - - - - - #
-# - - - - - - - ON APP STARTUP - - - - - - - #
-# - - - - - - - - - - - - - -  - - - - - - - #
-
-# Temporary values that are only used while testing and developing
-tempCachedSearchResultsMOVIE = {
-  "page": 1,
-  "results": [
-    {
-      "adult": False,
-      "backdrop_path": "/eD7FnB7LLrBV5ewjdGLYTAoV9Mv.jpg",
-      "genre_ids": [
-        28,
-        53
-      ],
-      "id": 245891,
-      "original_language": "en",
-      "original_title": "John Wick",
-      "overview": "Ex-hitman John Wick comes out of retirement to track down the gangsters that took everything from him.",
-      "popularity": 67.286,
-      "poster_path": "/fZPSd91yGE9fCcCe6OoQr6E3Bev.jpg",
-      "release_date": "2014-10-22",
-      "title": "John Wick",
-      "video": False,
-      "vote_average": 7.441,
-      "vote_count": 19412,
-      "added": False
-    },
-    {
-      "adult": False,
-      "backdrop_path": "/7I6VUdPj6tQECNHdviJkUHD2u89.jpg",
-      "genre_ids": [
-        28,
-        53,
-        80
-      ],
-      "id": 603692,
-      "original_language": "en",
-      "original_title": "John Wick: Chapter 4",
-      "overview": "With the price on his head ever increasing, John Wick uncovers a path to defeating The High Table. But before he can earn his freedom, Wick must face off against a new enemy with powerful alliances across the globe and forces that turn old friends into foes.",
-      "popularity": 157.406,
-      "poster_path": "/vZloFAK7NmvMGKE7VkF5UHaz0I.jpg",
-      "release_date": "2023-03-22",
-      "title": "John Wick: Chapter 4",
-      "video": False,
-      "vote_average": 7.7,
-      "vote_count": 6800,
-      "added": False
-    },
-    {
-      "adult": False,
-      "backdrop_path": "/r17jFHAemzcWPPtoO0UxjIX0xas.jpg",
-      "genre_ids": [
-        28,
-        53,
-        80
-      ],
-      "id": 324552,
-      "original_language": "en",
-      "original_title": "John Wick: Chapter 2",
-      "overview": "John Wick is forced out of retirement by a former associate looking to seize control of a shadowy international assassins’ guild. Bound by a blood oath to aid him, Wick travels to Rome and does battle against some of the world’s most dangerous killers.",
-      "popularity": 87.215,
-      "poster_path": "/hXWBc0ioZP3cN4zCu6SN3YHXZVO.jpg",
-      "release_date": "2017-02-08",
-      "title": "John Wick: Chapter 2",
-      "video": False,
-      "vote_average": 7.3,
-      "vote_count": 13196,
-      "added": True
-    },
-    {
-      "adult": False,
-      "backdrop_path": "/vVpEOvdxVBP2aV166j5Xlvb5Cdc.jpg",
-      "genre_ids": [
-        28,
-        53,
-        80
-      ],
-      "id": 458156,
-      "original_language": "en",
-      "original_title": "John Wick: Chapter 3 - Parabellum",
-      "overview": "Super-assassin John Wick returns with a $14 million price tag on his head and an army of bounty-hunting killers on his trail. After killing a member of the shadowy international assassin’s guild, the High Table, John Wick is excommunicado, but the world’s most ruthless hit men and women await his every turn.",
-      "popularity": 78.205,
-      "poster_path": "/ziEuG1essDuWuC5lpWUaw1uXY2O.jpg",
-      "release_date": "2019-05-15",
-      "title": "John Wick: Chapter 3 - Parabellum",
-      "video": False,
-      "vote_average": 7.4,
-      "vote_count": 10765
-    },
-    {
-      "adult": False,
-      "backdrop_path": "/5IbxcBXZ5EhVAttfNDMPncikudr.jpg",
-      "genre_ids": [
-        28,
-        53,
-        80
-      ],
-      "id": 541671,
-      "original_language": "en",
-      "original_title": "From the World of John Wick: Ballerina",
-      "overview": "Taking place during the events of John Wick: Chapter 3 - Parabellum, Eve Macarro begins her training in the assassin traditions of the Ruska Roma.",
-      "popularity": 37.998,
-      "poster_path": "/bN9431goQjR5Lu0VziD7iKW0Hfd.jpg",
-      "release_date": "2025-06-04",
-      "title": "From the World of John Wick: Ballerina",
-      "video": False,
-      "vote_average": 0,
-      "vote_count": 0
-    },
-    {
-      "adult": False,
-      "backdrop_path": None,
-      "genre_ids": [
-        28,
-        80,
-        53
-      ],
-      "id": 730629,
-      "original_language": "en",
-      "original_title": "John Wick: Chapter 5",
-      "overview": "The fifth installment in the John Wick franchise. Plot TBA.",
-      "popularity": 15.064,
-      "poster_path": None,
-      "release_date": "",
-      "title": "John Wick: Chapter 5",
-      "video": False,
-      "vote_average": 0,
-      "vote_count": 0
-    },
-    {
-      "adult": False,
-      "backdrop_path": None,
-      "genre_ids": [],
-      "id": 619022,
-      "original_language": "en",
-      "original_title": "John Wick: Assassin's Code",
-      "overview": "John Wick Movie Extra",
-      "popularity": 11.962,
-      "poster_path": "/fJbw16AwM59dEhSiCIAfFGgIgOP.jpg",
-      "release_date": "2015-02-03",
-      "title": "John Wick: Assassin's Code",
-      "video": True,
-      "vote_average": 7.704,
-      "vote_count": 49
-    },
-    {
-      "adult": False,
-      "backdrop_path": None,
-      "genre_ids": [
-        99
-      ],
-      "id": 600991,
-      "original_language": "en",
-      "original_title": "Training 'John Wick'",
-      "overview": "A look at the fight choreography being developed for the film.",
-      "popularity": 6.569,
-      "poster_path": "/1x1fEoDe3GKBYh4iR4jhrouRXzT.jpg",
-      "release_date": "2017-06-13",
-      "title": "Training 'John Wick'",
-      "video": True,
-      "vote_average": 7.381,
-      "vote_count": 42
-    },
-    {
-      "adult": False,
-      "backdrop_path": "/vWNGnjBB3pa6R8slwjhwDxRqBUf.jpg",
-      "genre_ids": [
-        99
-      ],
-      "id": 651445,
-      "original_language": "en",
-      "original_title": "John Wick Chapter 2: Wick-vizzed",
-      "overview": "A candid look at rehearsal footage in support of a focus on pre-viz.",
-      "popularity": 6.78,
-      "poster_path": "/qQFBj2tBlkKhAcAgDVpdFWLX5x.jpg",
-      "release_date": "2017-06-13",
-      "title": "John Wick Chapter 2: Wick-vizzed",
-      "video": True,
-      "vote_average": 7.519,
-      "vote_count": 80
-    },
-    {
-      "adult": False,
-      "backdrop_path": None,
-      "genre_ids": [
-        99
-      ],
-      "id": 600987,
-      "original_language": "en",
-      "original_title": "Don't F*#% With John Wick",
-      "overview": "Behind the scenes look at fight choreography and action training.",
-      "popularity": 3.871,
-      "poster_path": "/d3m7SxiehljQ2r5dIHg7fGjfLXp.jpg",
-      "release_date": "2015-02-03",
-      "title": "Don't F*#% With John Wick",
-      "video": False,
-      "vote_average": 7.522,
-      "vote_count": 45
-    },
-    {
-      "adult": False,
-      "backdrop_path": None,
-      "genre_ids": [
-        99
-      ],
-      "id": 600990,
-      "original_language": "en",
-      "original_title": "John Wick: Calling in the Cavalry",
-      "overview": "Short documentary that looks at a number of elements like the initial pitch for the project and the 2nd Unit action sequences.",
-      "popularity": 2.233,
-      "poster_path": "/gps49Xqjv0C6Kplb9jgDVAaE9CF.jpg",
-      "release_date": "2015-02-03",
-      "title": "John Wick: Calling in the Cavalry",
-      "video": False,
-      "vote_average": 7.194,
-      "vote_count": 18
-    },
-    {
-      "adult": False,
-      "backdrop_path": None,
-      "genre_ids": [
-        99
-      ],
-      "id": 1036194,
-      "original_language": "en",
-      "original_title": "As Above, So Below: The Underworld of 'John Wick'",
-      "overview": "A close look at the assassin's lifestyle in the film.",
-      "popularity": 4.005,
-      "poster_path": None,
-      "release_date": "2017-06-13",
-      "title": "As Above, So Below: The Underworld of 'John Wick'",
-      "video": True,
-      "vote_average": 7.535,
-      "vote_count": 43
-    },
-    {
-      "adult": False,
-      "backdrop_path": None,
-      "genre_ids": [
-        28,
-        80,
-        53
-      ],
-      "id": 1290912,
-      "original_language": "en",
-      "original_title": "From the World of John Wick: Caine",
-      "overview": "A spin-off to John Wick: Chapter 4 (2023), focusing on Donnie Yen's character Caine after he has been freed from his obligations to the High Table.",
-      "popularity": 6.445,
-      "poster_path": "/kqzN4QkrOEmtNHO6SejeoKqT7aW.jpg",
-      "release_date": "",
-      "title": "From the World of John Wick: Caine",
-      "video": False,
-      "vote_average": 0,
-      "vote_count": 0
-    },
-    {
-      "adult": False,
-      "backdrop_path": None,
-      "genre_ids": [],
-      "id": 1412587,
-      "original_language": "en",
-      "original_title": "John Wick: Kill Count",
-      "overview": "This piece recaps all of the kills in the film.",
-      "popularity": 1.302,
-      "poster_path": "/85UbK3kmRQgOXiTul4Ux15Ony4d.jpg",
-      "release_date": "2017-06-13",
-      "title": "John Wick: Kill Count",
-      "video": False,
-      "vote_average": 7,
-      "vote_count": 1
-    },
-    {
-      "adult": False,
-      "backdrop_path": None,
-      "genre_ids": [],
-      "id": 1412091,
-      "original_language": "en",
-      "original_title": "John Wick: NYC Noir",
-      "overview": "There is currently no summary",
-      "popularity": 1.729,
-      "poster_path": "/wOy0Y9AygYgUFV28dNcQt1bloZh.jpg",
-      "release_date": "2015-02-03",
-      "title": "John Wick: NYC Noir",
-      "video": False,
-      "vote_average": 7,
-      "vote_count": 1
-    },
-    {
-      "adult": False,
-      "backdrop_path": None,
-      "genre_ids": [],
-      "id": 1412096,
-      "original_language": "en",
-      "original_title": "John Wick: The Red Circle",
-      "overview": "John Wick movie extras",
-      "popularity": 0.218,
-      "poster_path": "/wazHDUfdTQVkgYYBQp3aFAPI7Pk.jpg",
-      "release_date": "2015-02-03",
-      "title": "John Wick: The Red Circle",
-      "video": False,
-      "vote_average": 0,
-      "vote_count": 0
-    },
-    {
-      "adult": False,
-      "backdrop_path": None,
-      "genre_ids": [],
-      "id": 1412104,
-      "original_language": "en",
-      "original_title": "John Wick: Car Fu Ride-Along",
-      "overview": "A look at the several Mustangs they used, which perhaps gives vintage car lovers hopes that some of them at least escaped without a scratch.",
-      "popularity": 0.363,
-      "poster_path": "/jIetn6jz6x0oLnBlGBe2KPkPDqN.jpg",
-      "release_date": "2017-06-13",
-      "title": "John Wick: Car Fu Ride-Along",
-      "video": False,
-      "vote_average": 7,
-      "vote_count": 1
-    },
-    {
-      "adult": False,
-      "backdrop_path": None,
-      "genre_ids": [],
-      "id": 1412106,
-      "original_language": "en",
-      "original_title": "Retro Wick: Exploring the Unexpected Success of 'John Wick'",
-      "overview": "A look at the phenomenal excitement the first film generated.",
-      "popularity": 0.769,
-      "poster_path": "/qF9kAHUt8ewbO8YX2OF00EQmjYL.jpg",
-      "release_date": "2017-06-13",
-      "title": "Retro Wick: Exploring the Unexpected Success of 'John Wick'",
-      "video": False,
-      "vote_average": 7,
-      "vote_count": 2
-    }
-  ],
-  "total_pages": 1,
-  "total_results": 18
-}
-
-tempCachedSearchResultsTV = {
-  "page": 1,
-  "results": [
-    {
-      "adult": False,
-      "backdrop_path": "/rqbCbjB19amtOtFQbb3K2lgm2zv.jpg",
-      "genre_ids": [
-        16,
-        10765,
-        10759
-      ],
-      "id": 1429,
-      "origin_country": [
-        "JP"
-      ],
-      "original_language": "ja",
-      "original_name": "進撃の巨人",
-      "overview": "Many years ago, the last remnants of humanity were forced to retreat behind the towering walls of a fortified city to escape the massive, man-eating Titans that roamed the land outside their fortress. Only the heroic members of the Scouting Legion dared to stray beyond the safety of the walls – but even those brave warriors seldom returned alive. Those within the city clung to the illusion of a peaceful existence until the day that dream was shattered, and their slim chance at survival was reduced to one horrifying choice: kill – or be devoured!",
-      "popularity": 117.125,
-      "poster_path": "/hTP1DtLGFamjfu8WqjnuQdP1n4i.jpg",
-      "first_air_date": "2013-04-07",
-      "name": "Attack on Titan",
-      "vote_average": 8.664,
-      "vote_count": 6552,
-      "genres": [
-        "Animation",
-        "Sci-Fi & Fantasy",
-        "Action & Adventure"
-      ],
-      "in_watch_list": False
-    },
-    {
-      "adult": False,
-      "backdrop_path": "/2Eq2CYTV8cAJeddla6vFgIlxIH6.jpg",
-      "genre_ids": [
-        16,
-        10759,
-        35,
-        10765
-      ],
-      "id": 63510,
-      "origin_country": [
-        "JP"
-      ],
-      "original_language": "ja",
-      "original_name": "進撃！巨人中学校",
-      "overview": "Your favorite characters from Attack on Titan are back in…junior high school? Adapted from the hit spinoff manga series—Attack on Titan: Junior High (written by Saki Nakagawa), this parody reimagines Eren, Mikasa, Armin, and other characters from the original manga as students and teachers at Titan Junior High School.",
-      "popularity": 31.505,
-      "poster_path": "/el6yFiXQxiPLZLCJsukAI9UTI6J.jpg",
-      "first_air_date": "2015-10-04",
-      "name": "Attack on Titan: Junior High",
-      "vote_average": 7.8,
-      "vote_count": 189,
-      "genres": [
-        "Animation",
-        "Action & Adventure",
-        "Comedy",
-        "Sci-Fi & Fantasy"
-      ],
-      "in_watch_list": False
-    },
-    {
-      "adult": False,
-      "backdrop_path": "/xx4XR49EeQI5loG8mr5aUvQ28QN.jpg",
-      "genre_ids": [
-        10759,
-        10765
-      ],
-      "id": 65242,
-      "origin_country": [
-        "JP"
-      ],
-      "original_language": "ja",
-      "original_name": "進撃の巨人 反撃の狼煙",
-      "overview": "During the Great Titan War, a race of giants called Titans nearly wiped out humanity. The survivors built three concentric walls tall enough to keep the Titans out, but a century into that era of peace, the Colossal Titan suddenly appeared and kicked a hole through the Outer Wall, allowing other Titans to surge through. Forced to retreat behind the Middle Wall, humanity begins planning its retaliation.",
-      "popularity": 18.702,
-      "poster_path": "/6oKXmDiGhbCfaZKPjWCpMSfG9SH.jpg",
-      "first_air_date": "2015-08-15",
-      "name": "Attack on Titan: Counter Rockets",
-      "vote_average": 7.5,
-      "vote_count": 12,
-      "genres": [
-        "Action & Adventure",
-        "Sci-Fi & Fantasy"
-      ],
-      "in_watch_list": False
-    },
-    {
-      "adult": False,
-      "backdrop_path": "/jAVps245e8l1ZtZP0rZXSKT5VJC.jpg",
-      "genre_ids": [
-        10765,
-        35,
-        16,
-        10759
-      ],
-      "id": 233735,
-      "origin_country": [
-        "JP"
-      ],
-      "original_language": "ja",
-      "original_name": "「進撃の巨人」ちみキャラ劇場\"とんでけ! 訓練兵団\"",
-      "overview": "Shingeki no Kyojin Picture Drama is a series of Flash animation shorts included in the Blu-ray Disc/DVD releases, featuring the characters in chibi format. Each episode depicts their training days to become humanity's hope in the war against the Titans.",
-      "popularity": 7.57,
-      "poster_path": "/wyFtcneTysf7dd3ZqFnDPL0EZYN.jpg",
-      "first_air_date": "2013-07-17",
-      "name": "Attack on Titan Picture Drama",
-      "vote_average": 10,
-      "vote_count": 1,
-      "genres": [
-        "Sci-Fi & Fantasy",
-        "Comedy",
-        "Animation",
-        "Action & Adventure"
-      ],
-      "in_watch_list": False
-    }
-  ],
-  "total_pages": 1,
-  "total_results": 4
-}
+# Keep a couple copies of the search results cached for the duration of the server runtime
+tmdbQueryCacheMaxSize = 5
+tmdbQueryCache = OrderedDict()
 
 # - - - - - - - - - - - - - - - - - - - - #
 # - - - - - - - BASIC TOOLS - - - - - - - #
@@ -582,7 +124,6 @@ async def download_image(image_url: str, image_save_path: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-
 # Used to validate the sesion key
 def validateSessionKey(session_key=None, guest_lock=True):
     if session_key != None and session_key != '':
@@ -596,6 +137,18 @@ def validateSessionKey(session_key=None, guest_lock=True):
         return 1  # Default to guest's userID (1) if no session key is provided
     else:
         raise HTTPException(status_code=405, detail="Account required.")
+
+
+# Add search queries to cache since it takes so long to fetch them
+def add_to_cache(key, value):
+    global tmdbQueryCache
+    
+    # If the cache is full, pop the oldest item
+    if len(tmdbQueryCache) >= tmdbQueryCacheMaxSize:
+        tmdbQueryCache.popitem(last=False)  # Remove the oldest item
+    
+    # Add the new item to the cache
+    tmdbQueryCache[key] = value
 
 
 # Landing page that shows what is available (SUPER OUT OF DATE)
@@ -1816,17 +1369,24 @@ def watch_list_search(
     title_category: str = Query(..., regex="^(Movie|TV)$"),
     title_name: str = Query(None),
 ):
-    global tempCachedSearchResultsMOVIE
-    global tempCachedSearchResultsTV
+    global tmdbQueryCache
 
+    # Validate the session key and get user_id
     user_id = validateSessionKey(session_key, False)
 
     if title_name:
-        search_results = query_tmdb(f"/search/{title_category.lower()}", {"query": title_name, "include_adult": True})
-    elif 'tempCachedSearchResultsMOVIE' in globals() and title_category == "Movie":
-        search_results = tempCachedSearchResultsMOVIE
-    elif 'tempCachedSearchResultsTV' in globals() and title_category == "TV":
-        search_results = tempCachedSearchResultsTV
+        title_lower = title_name.lower()
+
+        # Use .get() to safely retrieve from the cache
+        search_results = tmdbQueryCache.get(title_lower)
+
+        if search_results is not None:
+            # Cache hit
+            pass
+        else:
+            # Cache miss: Query the TMDB API
+            search_results = query_tmdb(f"/search/{title_category.lower()}", {"query": title_name, "include_adult": True})
+            add_to_cache(title_lower, search_results)  # Add to cache with size limitation
     else:
         raise HTTPException(status_code=400, detail="Title name is required.")
 
@@ -1857,7 +1417,7 @@ def watch_list_search(
     return search_results
 
 
-# Used to get the images for a title and only the title. Doesn't include season or episodes
+# Used to get the images for a title and only the title. Seasons and episodes have a seperate one
 async def store_title_images(movie_images, title_id: str):
     try:
         base_path = f'/fastapi-images/{title_id}'
@@ -1877,10 +1437,13 @@ async def store_title_images(movie_images, title_id: str):
 
         # Get the first poster
         if 'posters' in movie_images:
-            poster = movie_images['posters'][:1]  # Get only the first poster
-            for idx, image in enumerate(poster):
-                image_url = f"https://image.tmdb.org/t/p/original{image['file_path']}"
-                file_extension = image['file_path'].split('.')[-1]
+            # Filter posters to only include those with "iso_639_1" as "en"
+            english_posters = [image for image in movie_images['posters'] if image.get('iso_639_1') == 'en']
+            
+            if english_posters:  # Check if there are any English posters
+                first_english_poster = english_posters[0]  # Get the first English poster
+                image_url = f"https://image.tmdb.org/t/p/original{first_english_poster['file_path']}"
+                file_extension = first_english_poster['file_path'].split('.')[-1]
                 image_filename = f"poster.{file_extension}"
                 image_save_path = os.path.join(base_path, image_filename)
                 tasks.append(download_image(image_url, image_save_path))
@@ -1996,6 +1559,7 @@ def add_or_update_genres_for_title(title_id, tmdb_genres):
         insert_genre_query = f"INSERT INTO title_genres (title_id, genre_id) VALUES {genre_values}"
         query_mysql(insert_genre_query)
 
+# Functions for the actual adding/updating of a movie or a tv-show
 async def add_or_update_movie_title(title_tmdb_id):
     try:
         # Get the data from TMDB
@@ -2365,6 +1929,34 @@ def save_user_title_notes(data: dict):
         raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+    
+
+@app.post("/watch_list/toggle_title_favourite")
+def toggle_title_favourite(data: dict):
+    try:
+        # Validate the session key
+        session_key = data.get("session_key")
+        user_id = validateSessionKey(session_key)
+
+        # Get the title ID
+        title_id = data.get("title_id")
+        if not title_id:
+            raise HTTPException(status_code=400, detail="Missing title_id")
+        
+        # Remove title from user's watch list
+        save_notes_query = """
+            UPDATE user_title_details
+            SET favourite = NOT favourite
+            WHERE userID = %s AND title_id = %s
+        """
+        query_mysql(save_notes_query, (user_id, title_id))
+
+        return {"message": "Favourite status toggled successfully!"}
+    
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 def convert_season_or_episode_id_to_title_id(season_id=None, episode_id=None):
@@ -2552,10 +2144,15 @@ def modify_title_watch_count(data: dict):
 @app.get("/watch_list/get_title_cards")
 def get_title_cards(
     session_key: str = Query(...),
-    title_type: str = Query(None, regex="^(Movie|TV)$"),  # Optional filter for category
-    watched: bool = None,
     title_count: int = None,
-    # sort_by: str = None,
+    # Optional sorting
+    sort_by: str = None,
+    # Optional filters
+    title_type: str = Query(None, regex="^(movie|tv)$"),  
+    watched: bool = None,
+    favourite: bool = None,
+    released: bool = None,
+    started: bool = None,
 ):
     # Get user_id and validate session key
     user_id = validateSessionKey(session_key, False)
@@ -2573,11 +2170,20 @@ def get_title_cards(
             t.type, 
             t.release_date,
             (SELECT COUNT(season_id) FROM seasons WHERE title_id = t.title_id) AS season_count,
-            (SELECT COUNT(episode_id) FROM episodes WHERE title_id = t.title_id) AS episode_count
+            (SELECT COUNT(episode_id) FROM episodes WHERE title_id = t.title_id) AS episode_count,
+            utd.favourite,
+            GREATEST(COALESCE(utd.last_updated, '1970-01-01'), 
+                    COALESCE(MAX(ued.last_updated), '1970-01-01')) AS latest_updated
         FROM 
             user_title_details utd
         JOIN 
             titles t ON utd.title_id = t.title_id
+        LEFT JOIN 
+            seasons s ON s.title_id = t.title_id
+        LEFT JOIN 
+            episodes e ON e.season_id = s.season_id
+        LEFT JOIN 
+            user_episode_details ued ON ued.userID = utd.userID AND ued.episode_id = e.episode_id
         WHERE 
             utd.userID = %s
     """
@@ -2590,18 +2196,75 @@ def get_title_cards(
         query_params.append(title_type.lower())  # Ensure correct ENUM value
 
     # Filter by watched status if provided
-    if watched is not None:
-        if watched == True:
-            get_titles_query += " AND utd.watch_count > 0"
-        else:
-            get_titles_query += " AND utd.watch_count = 0"
+    if watched is True:
+        get_titles_query += " AND utd.watch_count >= 1"
+    elif watched is False:
+        get_titles_query += " AND utd.watch_count <= 0"
 
-    # Add the order after WHERE clause is fully added
-    get_titles_query += " ORDER BY t.vote_average DESC"
+    # Filter by favourite status if provided
+    if favourite is True:
+        get_titles_query += " AND utd.favourite = TRUE"
+    elif favourite is False:
+        get_titles_query += " AND utd.favourite = FALSE"
+
+    # Filter by release date if provided
+    if released is True:
+        get_titles_query += " AND t.release_date <= CURDATE()"
+    elif released is False:
+        get_titles_query += " AND t.release_date > CURDATE()"
+
+    # Filter by whether the TV show has been started
+    if started is True:
+        get_titles_query += """
+            AND EXISTS (
+                SELECT 1 
+                FROM user_episode_details ued 
+                JOIN episodes e ON ued.episode_id = e.episode_id 
+                WHERE ued.userID = utd.userID 
+                AND e.title_id = t.title_id 
+                AND ued.watch_count > 0
+                LIMIT 1
+            )
+        """
+    elif started is False:
+        get_titles_query += """
+            AND NOT EXISTS (
+                SELECT 1 
+                FROM user_episode_details ued 
+                JOIN episodes e ON ued.episode_id = e.episode_id 
+                WHERE ued.userID = utd.userID 
+                AND e.title_id = t.title_id 
+                AND ued.watch_count > 0
+                LIMIT 1
+            )
+        """
+
+    # Grouping clause
+    get_titles_query += """
+        GROUP BY
+            t.title_id, 
+            t.title_name, 
+            t.vote_average, 
+            t.vote_count, 
+            t.poster_url, 
+            t.movie_runtime, 
+            utd.watch_count, 
+            t.type, 
+            t.release_date,
+            utd.favourite
+    """
+
+    # Add sorting if provided
+    if sort_by == "release_date":
+        get_titles_query += " ORDER BY t.release_date DESC"
+    elif sort_by == "last_watched":
+        get_titles_query += " ORDER BY latest_updated DESC"
+    else:
+        get_titles_query += " ORDER BY t.vote_average DESC"
 
     # Add the limit
     if title_count is None:
-        title_count = 10
+        title_count = 12
 
     get_titles_query += " LIMIT %s"
     query_params.append(title_count)
@@ -2625,38 +2288,9 @@ def get_title_cards(
             "release_date": row[8],
             "season_count": row[9],
             "episode_count": row[10],
+            "is_favourite": row[11],
+            "user_data_last_updated": row[12],
         }
-
-        # Additional data if the title is tv
-        # if row[7] == "tv":
-        #     last_watched_query = """
-        #         SELECT e.episode_number, s.season_number, s.episode_count
-        #         FROM user_episode_details ued
-        #         JOIN episodes e ON ued.episode_id = e.episode_id
-        #         JOIN seasons s ON e.season_id = s.season_id
-        #         WHERE ued.userID = %s AND e.title_id = %s AND ued.watch_count > 0
-        #         ORDER BY s.season_number DESC, e.episode_number DESC
-        #         LIMIT 1;
-        #     """
-        #     last_watched_result = query_mysql(last_watched_query, (user_id, row[0]))
-
-        #     if last_watched_result:
-        #         title_data["last_watched_episode"] = last_watched_result[0][0]
-        #         title_data["last_watched_season"] = last_watched_result[0][1]
-        #         title_data["last_watched_season_episode_count"] = last_watched_result[0][2]
-        #     else:
-        #         first_season_episode_count_query = """
-        #             SELECT episode_count 
-        #             FROM seasons 
-        #             WHERE title_id = %s 
-        #                 AND season_number = 1 
-        #             LIMIT 1
-        #         """
-        #         first_season_episode_count_result = query_mysql(first_season_episode_count_query, (row[0],))
-        #         if first_season_episode_count_result:
-        #             title_data["last_watched_episode"] = 0
-        #             title_data["last_watched_season"] = 1
-        #             title_data["last_watched_season_episode_count"] = first_season_episode_count_result[0][0]
 
         formatted_results.append(title_data)
 
@@ -2704,7 +2338,8 @@ def get_title_info(
                 utd.watch_count, 
                 utd.notes, 
                 utd.last_updated,
-                GROUP_CONCAT(g.genre_name ORDER BY g.genre_name SEPARATOR ', ') AS genres
+                GROUP_CONCAT(g.genre_name ORDER BY g.genre_name SEPARATOR ', ') AS genres,
+                utd.favourite
             FROM user_title_details utd
             JOIN titles t ON utd.title_id = t.title_id
             LEFT JOIN title_genres tg ON t.title_id = tg.title_id
@@ -2734,7 +2369,8 @@ def get_title_info(
             "user_title_notes": title_query_results[16],
             "user_title_last_updated": title_query_results[17],
             "title_genres": title_query_results[18].split(", ") if title_query_results[18] else [],
-            "backdrop_image_count": get_backdrop_count(title_query_results[0])
+            "backdrop_image_count": get_backdrop_count(title_query_results[0]),
+            "favourite": title_query_results[19]
         }
     else:
         # Base query for when title is NOT in user's watchlist
@@ -2771,7 +2407,8 @@ def get_title_info(
             "user_title_notes": None,
             "user_title_last_updated": None,
             "title_genres": title_query_results_not_on_list[15].split(", ") if title_query_results_not_on_list[15] else [],
-            "backdrop_image_count": get_backdrop_count(title_query_results_not_on_list[0])
+            "backdrop_image_count": get_backdrop_count(title_query_results_not_on_list[0]),
+            "favourite": None
         }
 
     # Get the seasons and episodes if it's a TV show

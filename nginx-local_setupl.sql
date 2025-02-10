@@ -1,14 +1,14 @@
 
 --------------- USER MANAGEMENT ---------------
 DROP TABLE IF EXISTS users;
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     userID INT AUTO_INCREMENT PRIMARY KEY,
     username VARCHAR(128) NOT NULL UNIQUE,
     password VARCHAR(255) NOT NULL
 );
 
 DROP TABLE IF EXISTS sessions;
-CREATE TABLE sessions (
+CREATE TABLE IF NOT EXISTS sessions (
     sessionID CHAR(36) PRIMARY KEY, -- UUID or similar unique token
     userID INT NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -18,7 +18,7 @@ CREATE TABLE sessions (
 
 --------------- TRANSACTIONS ---------------
 DROP TABLE IF EXISTS transactions;
-CREATE TABLE transactions (
+CREATE TABLE IF NOT EXISTS transactions (
     transactionID INT AUTO_INCREMENT PRIMARY KEY,
     direction ENUM('expense', 'income') NOT NULL,
     date DATE NOT NULL,
@@ -29,7 +29,7 @@ CREATE TABLE transactions (
 );
 
 DROP TABLE IF EXISTS transaction_items;
-CREATE TABLE transaction_items (
+CREATE TABLE IF NOT EXISTS transaction_items (
     itemID INT AUTO_INCREMENT PRIMARY KEY,
     transactionID INT NOT NULL,
     category VARCHAR(128) NOT NULL,
@@ -39,7 +39,7 @@ CREATE TABLE transaction_items (
 
 --------------- BACKUPS ---------------
 DROP TABLE IF EXISTS backups;
-CREATE TABLE backups (
+CREATE TABLE IF NOT EXISTS backups (
     backup_id INT AUTO_INCREMENT PRIMARY KEY,
     backup_name VARCHAR(64) NOT NULL,
     backup_direction ENUM('up', 'down') NOT NULL,
@@ -60,13 +60,16 @@ CREATE TABLE backups (
 
 
 --------------- WATCH LIST ---------------
--- General info
+-- Title and its children
 DROP TABLE IF EXISTS titles;
-CREATE TABLE titles (
+CREATE TABLE IF NOT EXISTS titles (
     title_id INT AUTO_INCREMENT PRIMARY KEY,
-    tmdb_id INT,
+    tmdb_id INT UNIQUE,
+    imdb_id VARCHAR(10),
     type ENUM('movie', 'tv') NOT NULL,
     title_name VARCHAR(255) NOT NULL,
+    title_name_original VARCHAR(255),
+    tagline VARCHAR(255),
     vote_average DECIMAL(3,1),
     vote_count INT,
     overview TEXT,
@@ -77,24 +80,71 @@ CREATE TABLE titles (
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
-DROP TABLE IF EXISTS episodes;
-CREATE TABLE episodes (
-    episode_id INT AUTO_INCREMENT PRIMARY KEY,
-    title_id INT NOT NULL,  
+DROP TABLE IF EXISTS seasons;
+CREATE TABLE IF NOT EXISTS seasons (
+    season_id INT AUTO_INCREMENT PRIMARY KEY,
+    title_id INT NOT NULL,
     season_number INT NOT NULL,
+    season_name VARCHAR(255),
+    vote_average DECIMAL(3,1),
+    vote_count INT,
+    episode_count SMALLINT,
+    overview TEXT,
+    poster_url VARCHAR(255),    
+    -- For the air date use season[0].air_date
+    FOREIGN KEY (title_id) REFERENCES titles(title_id) ON DELETE CASCADE,
+    UNIQUE(title_id, season_number), -- Add this unique constraint
+    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+DROP TABLE IF EXISTS episodes;
+CREATE TABLE IF NOT EXISTS episodes (
+    episode_id INT AUTO_INCREMENT PRIMARY KEY,
+    season_id INT NOT NULL,  
+    title_id INT NOT NULL,  
     episode_number INT NOT NULL,
-    episode_title VARCHAR(255),
+    episode_name VARCHAR(255),
     vote_average DECIMAL(3,1),
     vote_count INT,
     overview TEXT,
+    still_url VARCHAR(255),
     air_date DATE DEFAULT NULL,
     runtime INT DEFAULT NULL,
+    FOREIGN KEY (season_id) REFERENCES seasons(season_id) ON DELETE CASCADE,
+    FOREIGN KEY (title_id) REFERENCES titles(title_id) ON DELETE CASCADE,
+    UNIQUE(season_id, episode_number), -- Add this unique constraint
+    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+-- User details
+DROP TABLE IF EXISTS user_title_details;
+CREATE TABLE IF NOT EXISTS user_title_details (
+    userID INT NOT NULL,
+    title_id INT NOT NULL,
+    watch_count INT DEFAULT 0,
+    notes TEXT DEFAULT NULL,
+    favourite BOOLEAN DEFAULT FALSE,
+    PRIMARY KEY (userID, title_id),
+    FOREIGN KEY (userID) REFERENCES users(userID) ON DELETE CASCADE,
     FOREIGN KEY (title_id) REFERENCES titles(title_id) ON DELETE CASCADE,
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
+DROP TABLE IF EXISTS user_episode_details;
+CREATE TABLE IF NOT EXISTS user_episode_details (
+    userID INT NOT NULL,
+    episode_id INT NOT NULL,
+    watch_count INT DEFAULT 0,  
+    notes TEXT DEFAULT NULL,  
+    PRIMARY KEY (userID, episode_id),
+    FOREIGN KEY (userID) REFERENCES users(userID) ON DELETE CASCADE,
+    FOREIGN KEY (episode_id) REFERENCES episodes(episode_id) ON DELETE CASCADE
+    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+-- Genres
 DROP TABLE IF EXISTS genres;
-CREATE TABLE genres (
+CREATE TABLE IF NOT EXISTS genres (
     genre_id INT AUTO_INCREMENT PRIMARY KEY,
     tmdb_genre_id INT,
     genre_name VARCHAR(255) NOT NULL,
@@ -102,7 +152,7 @@ CREATE TABLE genres (
 );
 
 DROP TABLE IF EXISTS title_genres;
-CREATE TABLE title_genres (
+CREATE TABLE IF NOT EXISTS title_genres (
     title_id INT NOT NULL,
     genre_id INT NOT NULL,
     PRIMARY KEY (title_id, genre_id),
@@ -111,32 +161,16 @@ CREATE TABLE title_genres (
 );
 
 
--- User details
-DROP TABLE IF EXISTS user_episode_details;
-CREATE TABLE user_episode_details (
-    userID INT NOT NULL,
-    episode_id INT NOT NULL,
-    watch_count INT DEFAULT 0,  
-    notes TEXT DEFAULT NULL,  
-    PRIMARY KEY (userID, episode_id),
-    FOREIGN KEY (userID) REFERENCES users(userID) ON DELETE CASCADE,
-    FOREIGN KEY (episode_id) REFERENCES episodes(episode_id) ON DELETE CASCADE
-);
 
-DROP TABLE IF EXISTS user_title_details;
-CREATE TABLE user_title_details (
-    userID INT NOT NULL,
-    title_id INT NOT NULL,
-    watch_count INT DEFAULT 0,
-    notes TEXT DEFAULT NULL,
-    PRIMARY KEY (userID, title_id),
-    FOREIGN KEY (userID) REFERENCES users(userID) ON DELETE CASCADE,
-    FOREIGN KEY (title_id) REFERENCES titles(title_id) ON DELETE CASCADE
-);
 
 --------------- INDEXES ---------------
 
+
+-- Just ran this and left it be
 CREATE INDEX idx_user_id ON transactions(userID, date);
+
+
+-- Decided to not mess with these for now
 DROP INDEX idx_user_id ON transactions;
 
 SHOW INDEX FROM transactions;
@@ -144,8 +178,6 @@ SHOW INDEX FROM transaction_items;
 EXPLAIN SELECT * 
 FROM transactions 
 WHERE userID = 2;
-
-
 
 
 
