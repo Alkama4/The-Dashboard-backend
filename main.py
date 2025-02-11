@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import mysql.connector
@@ -20,7 +20,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],      # List of allowed origins  
+    allow_origins=["*"],      # List of allowed origins  (IP's listed)
     allow_methods=["*"],      # Allow all HTTP methods (GET, POST, etc.)
     allow_headers=["*"],      # Allow all headers
 )
@@ -153,11 +153,14 @@ def add_to_cache(key, value):
 
 # Landing page that shows what is available (SUPER OUT OF DATE)
 @app.get("/")
-def root():
+def root(request: Request):
     return {
         "Head": "Hello world!",
         "Text": "Welcome to the FastAPI backend for the Vue.js frontend. The available endpoints are listed below.",
         "Note": "This isn't updated regularly and is out of date",
+        "Request came from": request.client.host,
+        # "Request headers": request.headers,
+        # "forwarded_for": request.headers.get("x-forwarded-for"),
         "Endp": [
             "/  (This page)",
             "/login",
@@ -1563,12 +1566,32 @@ def add_or_update_genres_for_title(title_id, tmdb_genres):
 async def add_or_update_movie_title(title_tmdb_id):
     try:
         # Get the data from TMDB
-        movie_title_info = query_tmdb(f"/movie/{title_tmdb_id}", {"append_to_response": "images", "include_image_language": "en,null"})
+        movie_title_info = query_tmdb(f"/movie/{title_tmdb_id}", {
+            "append_to_response": "images,releases,videos",
+            "include_image_language": "en,null",
+        })
 
         # Insert the movie into titles
         query = """
-            INSERT INTO titles (tmdb_id, imdb_id, type, title_name, title_name_original, tagline, vote_average, vote_count, overview, poster_url, backdrop_url, movie_runtime, release_date)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO titles (
+                tmdb_id, 
+                imdb_id, 
+                type, 
+                title_name, 
+                title_name_original, 
+                tagline, 
+                vote_average, 
+                vote_count, 
+                overview, 
+                poster_url, 
+                backdrop_url, 
+                movie_runtime, 
+                release_date,
+                original_language,
+                age_rating,
+                trailer_key
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE 
                 imdb_id = VALUES(imdb_id),
                 title_name = VALUES(title_name),
@@ -1579,8 +1602,38 @@ async def add_or_update_movie_title(title_tmdb_id):
                 overview = VALUES(overview),
                 poster_url = VALUES(poster_url),
                 backdrop_url = VALUES(backdrop_url),
-                release_date = VALUES(release_date);
+                release_date = VALUES(release_date),
+                original_language = VALUES(original_language),
+                age_rating = VALUES(age_rating),
+                trailer_key = VALUES(trailer_key);
         """
+
+        # Retrieve the age rating
+        movie_title_age_rating = None
+        us_movie_title_age_rating = None
+        for release in movie_title_info['releases']['countries']:
+            if release['iso_3166_1'] == 'FI':
+                movie_title_age_rating = release['certification']
+                break
+            elif release['iso_3166_1'] == 'US':
+                us_movie_title_age_rating = release['certification']
+
+        if movie_title_age_rating == None:
+            if us_movie_title_age_rating:
+                movie_title_age_rating = us_movie_title_age_rating + " (US)"
+            else:
+                movie_title_age_rating = None
+
+
+        # Retrieve the youtube trailer key
+        movie_title_trailer_key = None
+        for video in movie_title_info["videos"]["results"]:
+            if video["site"] == "YouTube" and video["type"] == "Trailer":
+                movie_title_trailer_key = video["key"]
+                if video["official"] == True:
+                    break
+
+        # Generate params
         params = (
             movie_title_info.get('id'),
             movie_title_info.get('imdb_id'),
@@ -1594,7 +1647,10 @@ async def add_or_update_movie_title(title_tmdb_id):
             movie_title_info.get('poster_path'),
             movie_title_info.get('backdrop_path'),
             movie_title_info.get('runtime'),
-            movie_title_info.get('release_date')
+            movie_title_info.get('release_date'),
+            movie_title_info.get('original_language'),
+            movie_title_age_rating,
+            movie_title_trailer_key
         )
         title_id = query_mysql(query, params, fetch_last_row_id=True)
 
@@ -1622,13 +1678,33 @@ async def add_or_update_movie_title(title_tmdb_id):
 async def add_or_update_tv_title(title_tmdb_id):
     try:
         # Get the data from tmdb
-        tv_title_info = query_tmdb(f"/tv/{title_tmdb_id}", {"append_to_response": "external_ids,images", "include_image_language": "en,null"})
+        tv_title_info = query_tmdb(f"/tv/{title_tmdb_id}", {
+            "append_to_response": "external_ids,images,content_ratings,videos", 
+            "include_image_language": "en,null"
+        })
 
         # - - - TITLE - - - 
         # Insert the tv-series info into titles
         tv_title_query = """
-            INSERT INTO titles (tmdb_id, imdb_id, type, title_name, title_name_original, tagline, vote_average, vote_count, overview, poster_url, backdrop_url, movie_runtime, release_date)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO titles (
+                tmdb_id, 
+                imdb_id, 
+                type, 
+                title_name, 
+                title_name_original, 
+                tagline, 
+                vote_average, 
+                vote_count, 
+                overview, 
+                poster_url, 
+                backdrop_url, 
+                movie_runtime, 
+                release_date,
+                original_language,
+                age_rating,
+                trailer_key
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE 
                 imdb_id = VALUES(imdb_id),
                 title_name = VALUES(title_name),
@@ -1639,8 +1715,36 @@ async def add_or_update_tv_title(title_tmdb_id):
                 overview = VALUES(overview),
                 poster_url = VALUES(poster_url),
                 backdrop_url = VALUES(backdrop_url),
-                release_date = VALUES(release_date);
+                release_date = VALUES(release_date),
+                original_language = VALUES(original_language),
+                age_rating = VALUES(age_rating),
+                trailer_key = VALUES(trailer_key);
         """
+
+        # Retrieve the age rating
+        tv_title_age_rating = None
+        us_tv_title_age_rating = None
+        for release in tv_title_info['content_ratings']['results']:
+            if release['iso_3166_1'] == 'FI':
+                tv_title_age_rating = release['rating']
+                break
+            elif release['iso_3166_1'] == 'US':
+                us_tv_title_age_rating = release['rating']
+
+        if tv_title_age_rating == None:
+            if us_tv_title_age_rating:
+                tv_title_age_rating = us_tv_title_age_rating + " (US)"
+            else:
+                tv_title_age_rating = ""
+
+        # Retrieve the youtube trailer key
+        tv_title_trailer_key = None
+        for video in tv_title_info["videos"]["results"]:
+            if video["site"] == "YouTube" and video["type"] == "Trailer":
+                tv_title_trailer_key = video["key"]
+                if video["official"] == True:
+                    break
+
         tv_title_params = (
             tv_title_info.get('id'),
             tv_title_info.get('external_ids', {}).get('imdb_id'),
@@ -1654,9 +1758,15 @@ async def add_or_update_tv_title(title_tmdb_id):
             tv_title_info.get('poster_path'),
             tv_title_info.get('backdrop_path'),
             None,   # there's no runtime since its tv
-            tv_title_info.get('first_air_date')
+            tv_title_info.get('first_air_date'),
+            tv_title_info.get('original_language'),
+            tv_title_age_rating,
+            tv_title_trailer_key
         )
+        # Set id fetch to False since it often fails
         title_id = query_mysql(tv_title_query, tv_title_params, True)
+
+        print("PÄÄSTIIN TÄNNE SAAKKA!")
 
         # When updating the fetch_last_row_id returns a 0 sometimes for some reason so fetch the id seperately
         if title_id == 0:
@@ -2334,12 +2444,29 @@ def get_title_info(
         # Base query for when title is in user's watchlist
         get_titles_query = """
             SELECT 
-                t.*, 
-                utd.watch_count, 
-                utd.notes, 
+                t.title_id,
+                t.tmdb_id, 
+                t.imdb_id, 
+                t.type, 
+                t.title_name, 
+                t.title_name_original, 
+                t.tagline, 
+                t.vote_average, 
+                t.vote_count, 
+                t.overview, 
+                t.poster_url, 
+                t.backdrop_url, 
+                t.movie_runtime, 
+                t.release_date,
+                t.original_language,
+                t.age_rating,
+                t.trailer_key,
+                t.last_updated,
+                utd.watch_count,
+                utd.notes,
+                utd.favourite,
                 utd.last_updated,
-                GROUP_CONCAT(g.genre_name ORDER BY g.genre_name SEPARATOR ', ') AS genres,
-                utd.favourite
+                GROUP_CONCAT(g.genre_name ORDER BY g.genre_name SEPARATOR ', ') AS genres
             FROM user_title_details utd
             JOIN titles t ON utd.title_id = t.title_id
             LEFT JOIN title_genres tg ON t.title_id = tg.title_id
@@ -2364,19 +2491,39 @@ def get_title_info(
             "backdrop_url": title_query_results[11],
             "movie_runtime": title_query_results[12],
             "release_date": title_query_results[13],
-            "title_info_last_updated": title_query_results[14],
-            "user_watch_count": title_query_results[15],
-            "user_title_notes": title_query_results[16],
-            "user_title_last_updated": title_query_results[17],
-            "title_genres": title_query_results[18].split(", ") if title_query_results[18] else [],
-            "backdrop_image_count": get_backdrop_count(title_query_results[0]),
-            "favourite": title_query_results[19]
+            "original_language": title_query_results[14],
+            "age_rating": title_query_results[15],
+            "trailer_key": title_query_results[16],
+            "title_info_last_updated": title_query_results[17],
+            "user_title_watch_count": title_query_results[18],
+            "user_title_notes": title_query_results[19],
+            "user_title_favourite": title_query_results[20],
+            "user_title_last_updated": title_query_results[21],
+            "title_genres": title_query_results[22].split(", ") if title_query_results[22] else [],
+            "backdrop_image_count": get_backdrop_count(title_query_results[0])
         }
     else:
         # Base query for when title is NOT in user's watchlist
         get_titles_query_not_on_list = """
             SELECT 
-                t.*, 
+                t.title_id,
+                t.tmdb_id, 
+                t.imdb_id, 
+                t.type, 
+                t.title_name, 
+                t.title_name_original, 
+                t.tagline, 
+                t.vote_average, 
+                t.vote_count, 
+                t.overview, 
+                t.poster_url, 
+                t.backdrop_url, 
+                t.movie_runtime, 
+                t.release_date,
+                t.original_language,
+                t.age_rating,
+                t.trailer_key,
+                t.last_updated,
                 GROUP_CONCAT(g.genre_name ORDER BY g.genre_name SEPARATOR ', ') AS genres
             FROM titles t
             LEFT JOIN title_genres tg ON t.title_id = tg.title_id
@@ -2385,7 +2532,6 @@ def get_title_info(
             GROUP BY t.title_id;
         """
         title_query_results_not_on_list = query_mysql(get_titles_query_not_on_list, (title_id,))[0]
-        print(title_query_results_not_on_list)
 
         title_info = {
             "title_id": title_query_results_not_on_list[0],
@@ -2402,13 +2548,16 @@ def get_title_info(
             "backdrop_url": title_query_results_not_on_list[11],
             "movie_runtime": title_query_results_not_on_list[12],
             "release_date": title_query_results_not_on_list[13],
-            "title_info_last_updated": title_query_results_not_on_list[14],
+            "original_language": title_query_results_not_on_list[14],
+            "age_rating": title_query_results_not_on_list[15],
+            "trailer_key": title_query_results_not_on_list[16],
+            "title_info_last_updated": title_query_results_not_on_list[18],
             "user_watch_count": -1,
             "user_title_notes": None,
+            "user_title_favourite": None,
             "user_title_last_updated": None,
-            "title_genres": title_query_results_not_on_list[15].split(", ") if title_query_results_not_on_list[15] else [],
-            "backdrop_image_count": get_backdrop_count(title_query_results_not_on_list[0]),
-            "favourite": None
+            "title_genres": title_query_results_not_on_list[18].split(", ") if title_query_results_not_on_list[18] else [],
+            "backdrop_image_count": get_backdrop_count(title_query_results_not_on_list[0])
         }
 
     # Get the seasons and episodes if it's a TV show
@@ -2507,3 +2656,5 @@ async def get_image(image_path: str):
 
 # When updating watch count query the values for the title inside the updating endpoint and return them. 
 
+# To add:
+# production_companies (new table)

@@ -73,10 +73,13 @@ CREATE TABLE IF NOT EXISTS titles (
     vote_average DECIMAL(3,1),
     vote_count INT,
     overview TEXT,
-    poster_url VARCHAR(255),    -- First point to tmdb, but in the future host them with fastapi
-    backdrop_url VARCHAR(255),  -- First point to tmdb, but in the future host them with fastapi
+    poster_url VARCHAR(255),    -- Serve as a backup I guess for now
+    backdrop_url VARCHAR(255),  -- Serve as a backup I guess for now
     movie_runtime INT DEFAULT NULL,
     release_date DATE DEFAULT NULL,
+    original_language VARCHAR(10),
+    age_rating VARCHAR(10),
+    trailer_key CHAR(11),
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
@@ -165,12 +168,11 @@ CREATE TABLE IF NOT EXISTS title_genres (
 
 --------------- INDEXES ---------------
 
-
 -- Just ran this and left it be
 CREATE INDEX idx_user_id ON transactions(userID, date);
 
 
--- Decided to not mess with these for now
+-- Decided to not mess with these for now but here they are
 DROP INDEX idx_user_id ON transactions;
 
 SHOW INDEX FROM transactions;
