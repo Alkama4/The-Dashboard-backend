@@ -20,7 +20,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],      # List of allowed origins  (IP's listed)
+    allow_origins=["*"],      # List of allowed origins
     allow_methods=["*"],      # Allow all HTTP methods (GET, POST, etc.)
     allow_headers=["*"],      # Allow all headers
 )
@@ -1374,48 +1374,64 @@ def watch_list_search(
 ):
     global tmdbQueryCache
 
-    # Validate the session key and get user_id
+    # Validate the session key and retrieve the user ID
     user_id = validateSessionKey(session_key, False)
 
+    # Fetch search results from cache or TMDB API
     if title_name:
         title_lower = title_name.lower()
-
-        # Use .get() to safely retrieve from the cache
         search_results = tmdbQueryCache.get(title_lower)
-
-        if search_results is not None:
-            # Cache hit
-            pass
-        else:
-            # Cache miss: Query the TMDB API
-            search_results = query_tmdb(f"/search/{title_category.lower()}", {"query": title_name, "include_adult": True})
-            add_to_cache(title_lower, search_results)  # Add to cache with size limitation
+        if search_results is None:
+            search_results = query_tmdb(
+                f"/search/{title_category.lower()}",
+                {"query": title_name, "include_adult": False}
+            )
+            add_to_cache(title_lower, search_results)  # Store results in cache
     else:
         raise HTTPException(status_code=400, detail="Title name is required.")
 
+    # Retrieve genre mappings from the database
     genre_query = "SELECT tmdb_genre_id, genre_name FROM genres"
     genre_data = query_mysql(genre_query, ())
     if not genre_data:
         raise HTTPException(status_code=500, detail="Genres not found in the database.")
-    
     genre_dict = {genre[0]: genre[1] for genre in genre_data}
-    
+
+    # Get the TMDB IDs from search results
     tmdb_ids = [result.get('id') for result in search_results.get('results', [])]
+
+    # Fetch watchlist details (title_id) for the user
     if tmdb_ids:
         placeholders = ', '.join(['%s'] * len(tmdb_ids))
+
+        # Query to get title_id based on tmdb_id from the titles table
+        title_id_query = f"""
+            SELECT tmdb_id, title_id
+            FROM titles
+            WHERE tmdb_id IN ({placeholders})
+        """
+        title_id_data = query_mysql(title_id_query, (*tmdb_ids,))
+        title_id_dict = {row[0]: row[1] for row in title_id_data}
+
+        # Query to get user's watchlist details
         watchlist_query = f"""
-            SELECT t.tmdb_id FROM user_title_details utd
+            SELECT t.tmdb_id, t.title_id
+            FROM user_title_details utd
             JOIN titles t ON utd.title_id = t.title_id
             WHERE utd.userID = %s AND t.tmdb_id IN ({placeholders})
         """
         watchlist_data = query_mysql(watchlist_query, (user_id, *tmdb_ids))
-        watchlist_set = {row[0] for row in watchlist_data}
+        watchlist_dict = {row[0]: row[1] for row in watchlist_data}
     else:
-        watchlist_set = set()
+        title_id_dict = {}
+        watchlist_dict = {}
 
+    # Process search results: add genre names, watchlist status, and title_id
     for result in search_results.get('results', []):
         result['genres'] = [genre_dict.get(genre_id, "Unknown") for genre_id in result.get('genre_ids', [])]
-        result['in_watch_list'] = result.get('id') in watchlist_set
+        tmdb_id = result.get('id')
+        result['title_id'] = title_id_dict.get(tmdb_id)
+        result['in_watch_list'] = tmdb_id in watchlist_dict
 
     return search_results
 
@@ -1615,12 +1631,12 @@ async def add_or_update_movie_title(title_tmdb_id):
             if release['iso_3166_1'] == 'FI':
                 movie_title_age_rating = release['certification']
                 break
-            elif release['iso_3166_1'] == 'US':
+            elif release['iso_3166_1'] == 'US' and release['certification'] != '':
                 us_movie_title_age_rating = release['certification']
 
         if movie_title_age_rating == None:
             if us_movie_title_age_rating:
-                movie_title_age_rating = us_movie_title_age_rating + " (US)"
+                movie_title_age_rating = us_movie_title_age_rating
             else:
                 movie_title_age_rating = None
 
@@ -1728,12 +1744,12 @@ async def add_or_update_tv_title(title_tmdb_id):
             if release['iso_3166_1'] == 'FI':
                 tv_title_age_rating = release['rating']
                 break
-            elif release['iso_3166_1'] == 'US':
+            elif release['iso_3166_1'] == 'US' and release['rating'] != '':
                 us_tv_title_age_rating = release['rating']
 
         if tv_title_age_rating == None:
             if us_tv_title_age_rating:
-                tv_title_age_rating = us_tv_title_age_rating + " (US)"
+                tv_title_age_rating = us_tv_title_age_rating
             else:
                 tv_title_age_rating = ""
 
@@ -1973,6 +1989,19 @@ async def update_title_info(data: dict):
     return {"message": "Title information updated successfully."}
 
 
+@app.post("/watch_list/update_title_images")
+async def update_title_images(data: dict):
+
+    # get title id from vue
+    # from title id query the tmdb id and title type
+
+    # Make a tmdb query for the tmdb images for the title 
+    # Make a function that removes images for title
+    # Use the made functions to query the images again in the bg
+
+    return {"message": "Not implemented"}
+
+
 @app.post("/watch_list/remove_user_title")
 def remove_title(data: dict):
     try:
@@ -2055,9 +2084,9 @@ def toggle_title_favourite(data: dict):
         
         # Remove title from user's watch list
         save_notes_query = """
-            UPDATE user_title_details
-            SET favourite = NOT favourite
-            WHERE userID = %s AND title_id = %s
+            INSERT INTO user_title_details (userID, title_id, favourite)
+            VALUES (%s, %s, NOT favourite)
+            ON DUPLICATE KEY UPDATE favourite = NOT favourite
         """
         query_mysql(save_notes_query, (user_id, title_id))
 
@@ -2157,7 +2186,6 @@ def get_updated_user_title_data(user_id: int, title_id: int):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching updated data: {str(e)}")
-
 
 @app.post("/watch_list/modify_title_watch_count")
 def modify_title_watch_count(data: dict):
@@ -2552,7 +2580,7 @@ def get_title_info(
             "age_rating": title_query_results_not_on_list[15],
             "trailer_key": title_query_results_not_on_list[16],
             "title_info_last_updated": title_query_results_not_on_list[18],
-            "user_watch_count": -1,
+            "user_title_watch_count": -1,
             "user_title_notes": None,
             "user_title_favourite": None,
             "user_title_last_updated": None,
@@ -2630,7 +2658,7 @@ def get_title_info(
 
 
 @app.get("/image/{image_path:path}")
-@app.head("/image/{image_path:path}")  # HEAD for checking if image exists
+@app.head("/image/{image_path:path}")  # HEAD for checking if image exists. Not really used anymore but doesn't hurt to have
 async def get_image(image_path: str):
     # Define the full image path
     full_path = os.path.join("/fastapi-images", image_path)
@@ -2657,4 +2685,4 @@ async def get_image(image_path: str):
 # When updating watch count query the values for the title inside the updating endpoint and return them. 
 
 # To add:
-# production_companies (new table)
+# production_companies (new table) and image function
