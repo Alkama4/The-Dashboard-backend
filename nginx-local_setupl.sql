@@ -169,16 +169,27 @@ CREATE TABLE IF NOT EXISTS title_genres (
 DROP TABLE IF EXISTS server_resource_logs;
 CREATE TABLE server_resource_logs (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    cpu_temperature FLOAT NOT NULL,
-    ram_usage FLOAT NOT NULL,
-    cpu_usage FLOAT NOT NULL,
-    disk_usage FLOAT NOT NULL,
-    system_load FLOAT NOT NULL,
-    network_sent_bytes BIGINT NOT NULL,
-    network_recv_bytes BIGINT NOT NULL,
+    cpu_temperature FLOAT,
+    ram_usage FLOAT,
+    cpu_usage FLOAT,
+    disk_usage FLOAT,
+    system_load FLOAT,
+    network_sent_bytes BIGINT,
+    network_recv_bytes BIGINT,
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+
+DROP TABLE IF EXISTS server_fastapi_request_logs;
+CREATE TABLE server_fastapi_request_logs (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    endpoint VARCHAR(255),
+    status_code INT,
+    backend_time_ms FLOAT,
+    client_ip VARCHAR(45),
+    method VARCHAR(10),
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
 
 --------------- INDEXES ---------------

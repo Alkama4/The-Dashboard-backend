@@ -1,23 +1,29 @@
+# Standard libraries
+import asyncio
+import calendar
+import os
+import random
+import string
+import time
+from collections import defaultdict, OrderedDict
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from zoneinfo import ZoneInfo
+from typing import Literal
+
+# Third party libraries (most likely need prestart install)
+import mysql.connector
+import pandas as pd
+import psutil
+import httpx
+
+# Fast api imports
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-import mysql.connector
-from datetime import datetime, timedelta, date
-import random
-import string
-import calendar
-import os
-import psutil
-from zoneinfo import ZoneInfo
-from collections import defaultdict
-import pandas as pd
-import httpx
-from pathlib import Path
-import asyncio
-from collections import OrderedDict
 
+# Create fastAPI instance and set CORS middleware
 app = FastAPI()
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],      # List of allowed origins
@@ -26,6 +32,7 @@ app.add_middleware(
 )
 
 # Keep a couple copies of the search results cached for the duration of the server runtime
+# Might want to replace this with a mysql table wit BLOBs in the future because of workers.
 tmdbQueryCacheMaxSize = 5
 tmdbQueryCache = OrderedDict()
 
@@ -151,6 +158,27 @@ def add_to_cache(key, value):
     tmdbQueryCache[key] = value
 
 
+# Is ran everytime an endpoint is called
+# Used to log request for analysis
+@app.middleware("http")
+async def log_request_data(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    process_time = time.time() - start_time
+    endpoint = request.url.path
+    status_code = response.status_code
+    client_ip = request.client.host
+    method = request.method
+
+    insert_query = """
+    INSERT INTO server_fastapi_request_logs (endpoint, status_code, backend_time_ms, client_ip, method)
+    VALUES (%s, %s, %s, %s, %s)
+    """
+    query_mysql(insert_query, (endpoint, status_code, process_time * 1000, client_ip, method))
+
+    return response
+
+
 # Landing page that shows what is available (SUPER OUT OF DATE)
 @app.get("/")
 def root(request: Request):
@@ -245,9 +273,9 @@ def login(
     }
 
 
-@app.post("/get_login_status")
+@app.get("/get_login_status")
 def get_login_status(
-    sessionKey: str = Query(...)
+    session_key: str = Query(...)
 ):
     # Check if the session key exists and join it with the user table to get the username
     query = """
@@ -259,12 +287,13 @@ def get_login_status(
         WHERE sessionID = %s AND expires_at > NOW()
     );
     """
-    result = query_mysql(query, (sessionKey,))
+    result = query_mysql(query, (session_key,))
     if result:
         return {
             "loggedIn": True, 
             "username": result[0][0],
         }
+    
     else:
         return {
             "loggedIn": False,
@@ -286,7 +315,7 @@ def logout(
 # - - - - - - - - - - - - -  - - - - - - - #
 # - - - - - - - TRANSACTIONS - - - - - - - #
 # - - - - - - - - - - - - -  - - - - - - - #
-@app.post("/new_transaction")
+@app.post("/transactions/new_transaction")
 def new_transaction(data: dict):
     try:
         # Validate the session key
@@ -336,7 +365,7 @@ def new_transaction(data: dict):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
-@app.post("/edit_transaction")
+@app.post("/transactions/edit_transaction")
 def edit_transaction(data: dict):
     try:
         # Validate the session key
@@ -396,7 +425,8 @@ def edit_transaction(data: dict):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
-@app.post("/delete_transaction")
+# This should be DELETE but thats a later me problem
+@app.post("/transactions/delete_transaction")
 def delete_transaction(data: dict):
     try:
         # Validate the session key
@@ -432,7 +462,7 @@ def delete_transaction(data: dict):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
-@app.get("/get_transactions")
+@app.get("/transactions/get_transactions")
 def get_transactions(
     sort_by: str = Query("date", regex="^(date|counterparty|category|amount|notes)$"),
     sort_order: str = Query("asc", regex="^(asc|desc)$"),
@@ -613,7 +643,7 @@ def get_transactions(
     }
 
 
-@app.get("/get_options")
+@app.get("/transactions/get_options")
 def get_options(
     session_key: str = Query(None)
 ):
@@ -651,7 +681,7 @@ def get_options(
             "category": {"expense": categoryExpense, "income": categoryIncome}}
 
 
-@app.get("/get_filters")
+@app.get("/transactions/get_filters")
 def get_filters(
     session_key: str = Query(None)
 ):
@@ -744,20 +774,14 @@ def get_filters(
 # - - - - - - - - - - - - - - - - -  - - - - - - - #
 # - - - - - - - CHARTS AND ANALYTICS - - - - - - - #
 # - - - - - - - - - - - - - - - - -  - - - - - - - #
-@app.post("/get_chart/balance_over_time")
-def get_chart_balance_over_time(data: dict):
+@app.get("/get_chart/balance_over_time")
+def get_chart_balance_over_time(
+    session_key: str = Query(None),
+    initial_balance: int = Query(0)
+):
     try:
-
         # Validate the session key
-        session_key = data.get("session_key")
         user_id = validateSessionKey(session_key, False)
-
-        # Get initial balance from the request data
-        initial_balance = data.get("initial_balance", 0)  # Default to 0 if not provided
-        # If the user hasn't set a value for initial_balance, it will be None.
-        # This caused some headaches, so do not remove this check
-        if initial_balance is None:
-            initial_balance = 0
 
         # Query for the balance over time, but do not return the daily_balance
         balance_query = """
@@ -823,11 +847,12 @@ def get_chart_balance_over_time(data: dict):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
-@app.post("/get_chart/sum_by_month")
-def get_chart_sum_by_month(data: dict):
+@app.get("/get_chart/sum_by_month")
+def get_chart_sum_by_month(
+    session_key: str = Query(None),
+):
     try:
         # Validate the session key
-        session_key = data.get("session_key")
         user_id = validateSessionKey(session_key, False)
 
         # Query for the monthly sums of income, expense, and their total
@@ -873,12 +898,13 @@ def get_chart_sum_by_month(data: dict):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
-@app.post("/get_chart/categories_monthly")
-def get_chart_categories_monthly(data: dict):
+@app.get("/get_chart/categories_monthly")
+def get_chart_categories_monthly(
+    session_key: str = Query(None),
+    direction: Literal['expense', 'income'] = Query(default='expense')
+):
     try:
-        session_key = data.get("session_key")
         user_id = validateSessionKey(session_key, False)
-        direction = data.get("direction", "expense")
         
         # Query for min and max dates across both directions
         date_range_query = """
@@ -948,11 +974,12 @@ def get_chart_categories_monthly(data: dict):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
-@app.post("/analytics/get_general_stats")
-def analytics_get_general_stats(data: dict):
+@app.get("/analytics/get_general_stats")
+def analytics_get_general_stats(
+    session_key: str = Query(None),
+):
     try:
         # Validate the session key
-        session_key = data.get("session_key")
         user_id = validateSessionKey(session_key, False)
 
         # Query for general stats
@@ -992,15 +1019,16 @@ def analytics_get_general_stats(data: dict):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
-@app.post("/analytics/get_stats_for_timespan")
-def analytics_get_last_timespan_stats(data: dict):
+@app.get("/analytics/get_stats_for_timespan")
+def analytics_get_last_timespan_stats(
+    session_key: str = Query(None),
+    timespan: str = Query(None),
+):
     try:
         # Validate the session key
-        session_key = data.get("session_key")
         user_id = validateSessionKey(session_key, False)
 
         # Get timespan
-        timespan = data.get("timespan")
         if timespan not in ["month", "year"]:
             raise HTTPException(status_code=403, detail="Invalid or missing timespan. Allowed values: 'month', 'year'.")
 
@@ -1164,10 +1192,10 @@ def analytics_get_last_timespan_stats(data: dict):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
-# - - - - - - - - - - - - - - - -  - - - - - - - #
-# - - - - - - - BACKUPS AND DRIVES - - - - - - - #
-# - - - - - - - - - - - - - - - -  - - - - - - - #
-@app.post("/get_server_drives_info")
+# - - - - - - - - - - - - - - - - - - - - - - - - - - #
+# - - - - - - - BACKUPS AND SERVER INFO - - - - - - - #
+# - - - - - - - - - - - - - - - - - - - - - - - - - - #
+@app.get("/get_server_drives_info")
 def get_server_drives_info():
     try:
         # Define each folder with a name and path
