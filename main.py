@@ -1322,6 +1322,91 @@ def format_time_difference(delta):
     return " ".join(time_parts[:2])
 
 
+@app.post("/store_server_resource_logs")
+def store_server_resource_logs(data: dict):
+    try:
+        store_data_query = """
+            INSERT INTO server_resource_logs (
+                cpu_temperature,
+                cpu_usage,
+                ram_usage,
+                disk_usage,
+                system_load,
+                network_sent_bytes,
+                network_recv_bytes
+            ) 
+            VALUES (%s, %s, %s, %s, %s, %s, %s);
+        """
+        store_data_params = (
+            data["cpu_temperature"],
+            data["cpu_usage"],
+            data["ram_usage"],
+            data["disk_usage"],
+            data["system_load"],
+            data["network_sent_bytes"],
+            data["network_recv_bytes"],
+        )
+        query_mysql(store_data_query, store_data_params)
+        return {"message": "Success"}
+    
+    except Exception as e:
+        print(e)
+        return {"error": str(e)}
+    
+
+@app.get("/get_server_resource_logs")
+def get_server_resource_logs(timeframe: str = Query(None)):
+    try:
+        # Build the WHERE clause based on the timeframe
+        if timeframe == "24h":
+            where_clause = "timestamp >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 24 HOUR)"
+        elif timeframe == "7d":
+            where_clause = "timestamp >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 7 DAY)"
+        elif timeframe == "30d":
+            where_clause = "timestamp >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 30 DAY)"
+        else:
+            raise HTTPException(status_code=400, detail="Invalid timeframe")
+
+        # SQL query with dynamic WHERE clause
+        server_data_query = f"""
+            SELECT 
+                cpu_temperature,
+                cpu_usage,
+                ram_usage,
+                disk_usage,
+                system_load,
+                network_sent_bytes,
+                network_recv_bytes,
+                timestamp
+            FROM server_resource_logs
+            WHERE {where_clause}
+        """
+        
+        # Execute the query and fetch the result
+        server_data_result = query_mysql(server_data_query, ())
+
+        # Format the results so that we have objects instead of arrays
+        formatted_data = [
+            {
+                "cpu_temperature": result[0],
+                "cpu_usage": result[1],
+                "ram_usage": result[2],
+                "disk_usage": result[3],
+                "system_load": result[4],
+                "network_sent_bytes": result[5],
+                "network_recv_bytes": result[6],
+                "timestamp": result[7]
+            } 
+            for result in server_data_result
+        ]
+        
+        return {"data": formatted_data}
+    
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # - - - - - - - - - - - - - - - - - - - - - - - - - - #
 # - - - - - - - TV AND MOVIE WATCH LIST - - - - - - - #
 # - - - - - - - - - - - - - - - - - - - - - - - - - - #

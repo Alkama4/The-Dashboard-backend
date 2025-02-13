@@ -165,6 +165,21 @@ CREATE TABLE IF NOT EXISTS title_genres (
 
 
 
+--------------- SERVER LOGS ---------------
+DROP TABLE IF EXISTS server_resource_logs;
+CREATE TABLE server_resource_logs (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    cpu_temperature FLOAT NOT NULL,
+    ram_usage FLOAT NOT NULL,
+    cpu_usage FLOAT NOT NULL,
+    disk_usage FLOAT NOT NULL,
+    system_load FLOAT NOT NULL,
+    network_sent_bytes BIGINT NOT NULL,
+    network_recv_bytes BIGINT NOT NULL,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+
 
 --------------- INDEXES ---------------
 
