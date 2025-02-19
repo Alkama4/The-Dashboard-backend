@@ -2,39 +2,39 @@
 --------------- USER MANAGEMENT ---------------
 DROP TABLE IF EXISTS users;
 CREATE TABLE IF NOT EXISTS users (
-    userID INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT AUTO_INCREMENT PRIMARY KEY,
     username VARCHAR(128) NOT NULL UNIQUE,
     password VARCHAR(255) NOT NULL
 );
 
 DROP TABLE IF EXISTS sessions;
 CREATE TABLE IF NOT EXISTS sessions (
-    sessionID CHAR(36) PRIMARY KEY, -- UUID or similar unique token
-    userID INT NOT NULL,
+    session_id CHAR(36) PRIMARY KEY, -- UUID or similar unique token
+    user_id INT NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     expires_at DATETIME,
-    FOREIGN KEY (userID) REFERENCES users(userID) ON DELETE CASCADE
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
 
 --------------- TRANSACTIONS ---------------
 DROP TABLE IF EXISTS transactions;
 CREATE TABLE IF NOT EXISTS transactions (
-    transactionID INT AUTO_INCREMENT PRIMARY KEY,
+    transaction_id INT AUTO_INCREMENT PRIMARY KEY,
     direction ENUM('expense', 'income') NOT NULL,
     date DATE NOT NULL,
     counterparty VARCHAR(128) NOT NULL,
     notes TEXT,
-    userID INT NOT NULL,
-    FOREIGN KEY (userID) REFERENCES users(userID) ON DELETE CASCADE
+    user_id INT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
 
 DROP TABLE IF EXISTS transaction_items;
 CREATE TABLE IF NOT EXISTS transaction_items (
-    itemID INT AUTO_INCREMENT PRIMARY KEY,
+    item_id INT AUTO_INCREMENT PRIMARY KEY,
     transactionID INT NOT NULL,
     category VARCHAR(128) NOT NULL,
     amount DECIMAL(10,2) NOT NULL,
-    FOREIGN KEY (transactionID) REFERENCES transactions(transactionID) ON DELETE CASCADE
+    FOREIGN KEY (transactionID) REFERENCES transactions(transaction_id) ON DELETE CASCADE
 );
 
 --------------- BACKUPS ---------------
@@ -122,25 +122,25 @@ CREATE TABLE IF NOT EXISTS episodes (
 -- User details
 DROP TABLE IF EXISTS user_title_details;
 CREATE TABLE IF NOT EXISTS user_title_details (
-    userID INT NOT NULL,
+    user_id INT NOT NULL,
     title_id INT NOT NULL,
     watch_count INT DEFAULT 0,
     notes TEXT DEFAULT NULL,
     favourite BOOLEAN DEFAULT FALSE,
-    PRIMARY KEY (userID, title_id),
-    FOREIGN KEY (userID) REFERENCES users(userID) ON DELETE CASCADE,
+    PRIMARY KEY (user_id, title_id),
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
     FOREIGN KEY (title_id) REFERENCES titles(title_id) ON DELETE CASCADE,
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
 DROP TABLE IF EXISTS user_episode_details;
 CREATE TABLE IF NOT EXISTS user_episode_details (
-    userID INT NOT NULL,
+    user_id INT NOT NULL,
     episode_id INT NOT NULL,
     watch_count INT DEFAULT 0,  
     notes TEXT DEFAULT NULL,  
-    PRIMARY KEY (userID, episode_id),
-    FOREIGN KEY (userID) REFERENCES users(userID) ON DELETE CASCADE,
+    PRIMARY KEY (user_id, episode_id),
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
     FOREIGN KEY (episode_id) REFERENCES episodes(episode_id) ON DELETE CASCADE
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
@@ -172,7 +172,6 @@ CREATE TABLE server_resource_logs (
     cpu_temperature FLOAT,
     ram_usage FLOAT,
     cpu_usage FLOAT,
-    disk_usage FLOAT,
     system_load FLOAT,
     network_sent_bytes BIGINT,
     network_recv_bytes BIGINT,
@@ -195,7 +194,7 @@ CREATE TABLE server_fastapi_request_logs (
 --------------- INDEXES ---------------
 
 -- Just ran this and left it be
-CREATE INDEX idx_user_id ON transactions(userID, date);
+CREATE INDEX idx_user_id ON transactions(user_id, date);
 
 
 -- Decided to not mess with these for now but here they are
@@ -205,20 +204,20 @@ SHOW INDEX FROM transactions;
 SHOW INDEX FROM transaction_items;
 EXPLAIN SELECT * 
 FROM transactions 
-WHERE userID = 2;
+WHERE user_id = 2;
 
 
 
 --------------- DEFAULT VALUES ---------------
 
--- Insert guest user (hardcoding userID as 1)
-INSERT INTO users (userID, username, password) 
+-- Insert guest user (hardcoding user_id as 1)
+INSERT INTO users (user_id, username, password) 
 VALUES 
 (1, 'guest', '-'),
 (2, 'Aleksi', 'salasana');
 
--- Example transactions with hardcoded guest userID (1)
-INSERT INTO transactions (transactionID, direction, date, counterparty, notes, userID) 
+-- Example transactions with hardcoded guest user_id (1)
+INSERT INTO transactions (transaction_id, direction, date, counterparty, notes, user_id) 
 VALUES
 (1, 'expense', '2023-08-24', 'Cotton Club', 'Hernekeittoa', 1),
 (2, 'income', '2023-12-28', 'Kela', '', 1),
@@ -232,7 +231,7 @@ VALUES
 (10, 'expense', '2024-12-24', 'Parturi Hannele-Kallio', 'Jotaki safkaa', 1);
 
 -- Example transaction items associated with the above transactions
-INSERT INTO transaction_items (itemID, transactionID, category, amount) VALUES
+INSERT INTO transaction_items (item_id, transactionID, category, amount) VALUES
 (1, 1, 'Opiskelija lounas', 2.90),
 (2, 2, 'Asumistuki', 99.99),
 (3, 2, 'Opintotuki', 80.00),

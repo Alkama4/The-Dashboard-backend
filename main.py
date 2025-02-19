@@ -10,12 +10,15 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import Literal
+from io import BytesIO
 
 # Third party libraries (most likely need prestart install)
 import mysql.connector
 import pandas as pd
 import psutil
 import httpx
+from PIL import Image
+from starlette.responses import StreamingResponse
 
 # Fast api imports
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -35,6 +38,10 @@ app.add_middleware(
 # Might want to replace this with a mysql table wit BLOBs in the future because of workers.
 tmdbQueryCacheMaxSize = 5
 tmdbQueryCache = OrderedDict()
+
+# Semaphore so that we don't overwhelm the network with hundreads of conncections.
+semaphore = asyncio.Semaphore(5)
+
 
 # - - - - - - - - - - - - - - - - - - - - #
 # - - - - - - - BASIC TOOLS - - - - - - - #
@@ -82,10 +89,12 @@ def query_mysql(query: str, params: tuple = (), fetch_last_row_id=False):
             conn.close()
             return result
 
-        # Handle insert or other queries without return value
+        # Return affected rows for DELETE, UPDATE, INSERT
+        affected_rows = cursor.rowcount
         conn.commit()
         cursor.close()
         conn.close()
+        return affected_rows
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"MySQL query error: {str(e)}")
@@ -114,8 +123,10 @@ async def download_image(image_url: str, image_save_path: str):
             print(f"Image already exists: {image_save_path}, skipping download.")
             return
 
-        async with httpx.AsyncClient(timeout=None) as client:
-            response = await client.get(image_url)
+        global semaphore
+        async with semaphore:
+            async with httpx.AsyncClient(timeout=None) as client:
+                response = await client.get(image_url)
 
         if response.status_code == 200:
             # Saving part is unlimited, no semaphore needed here
@@ -134,14 +145,14 @@ async def download_image(image_url: str, image_save_path: str):
 # Used to validate the sesion key
 def validateSessionKey(session_key=None, guest_lock=True):
     if session_key != None and session_key != '':
-        # Validate the session and fetch userID
-        session_query = "SELECT userID FROM sessions WHERE sessionID = %s AND expires_at > NOW()"
+        # Validate the session and fetch user_id
+        session_query = "SELECT user_id FROM sessions WHERE session_id = %s AND expires_at > NOW()"
         session_result = query_mysql(session_query, (session_key,))
         if not session_result:
             raise HTTPException(status_code=403, detail="Invalid or expired session key.")
         return session_result[0][0]
     elif not guest_lock:
-        return 1  # Default to guest's userID (1) if no session key is provided
+        return 1  # Default to guest's user_id (1) if no session key is provided
     else:
         raise HTTPException(status_code=405, detail="Account required.")
 
@@ -202,11 +213,11 @@ def root(request: Request):
     }
 
 
-# - - - - - - - - - - - - - - - - - - - - - - - - #
-# - - - - - - - GENERAL LOGINS ETC. - - - - - - - #
-# - - - - - - - - - - - - - - - - - - - - - - - - #
+# - - - - - - - - - - - - - - -  - - - - - - - - #
+# - - - - - - - ACCOUNT MANAGEMENT - - - - - - - #
+# - - - - - - - - - - - - - - -  - - - - - - - - #
 
-@app.post("/login")
+@app.post("/account/login")
 def login(
     username: str = Query(...),
     password: str = Query(...),
@@ -218,10 +229,10 @@ def login(
         query = """
             SELECT username 
             FROM users 
-            WHERE userID = (
-                SELECT userID 
+            WHERE user_id = (
+                SELECT user_id 
                 FROM sessions 
-                WHERE sessionID = %s AND expires_at > NOW()
+                WHERE session_id = %s AND expires_at > NOW()
             );
         """
         result = query_mysql(query, (previousSessionKey,))
@@ -235,7 +246,7 @@ def login(
                 }
 
     # Check if the user exists in the database and query the password
-    query = "SELECT userID, password FROM users WHERE username = %s"
+    query = "SELECT user_id, password FROM users WHERE username = %s"
     user = query_mysql(query, (username,))
     
     # Basic password check (plaintext)
@@ -252,9 +263,9 @@ def login(
     expiration_time = datetime.now() + timedelta(days=14)
 
     # Insert the session key into the sessions table
-    user_id = user[0][0]  # Get userID from the query result
+    user_id = user[0][0]  # Get user_id from the query result
     insert_query = """
-        INSERT INTO sessions (sessionID, userID, expires_at) 
+        INSERT INTO sessions (session_id, user_id, expires_at) 
         VALUES (%s, %s, %s)
     """
     query_mysql(insert_query, (session_key, user_id, expiration_time))
@@ -273,7 +284,7 @@ def login(
     }
 
 
-@app.get("/get_login_status")
+@app.get("/account/get_login_status")
 def get_login_status(
     session_key: str = Query(...)
 ):
@@ -281,10 +292,10 @@ def get_login_status(
     query = """
     SELECT username 
     FROM users 
-    WHERE userID = (
-        SELECT userID 
+    WHERE user_id = (
+        SELECT user_id 
         FROM sessions 
-        WHERE sessionID = %s AND expires_at > NOW()
+        WHERE session_id = %s AND expires_at > NOW()
     );
     """
     result = query_mysql(query, (session_key,))
@@ -300,16 +311,128 @@ def get_login_status(
         }
     
 
-@app.post("/logout")
+@app.post("/account/logout")
 def logout(
     sessionKey: str = Query(...)
 ):
     # Delete the session key from the sessions table
-    query = "DELETE FROM sessions WHERE sessionID = %s"
+    query = "DELETE FROM sessions WHERE session_id = %s"
     query_mysql(query, (sessionKey,))
     return {
         "logOutSuccess": True,
     }
+
+# With this it's possible to have the exact same credentials. We can't just throw an error when the password matches since then the other user would know the credentials to the other account.
+# Quite an edge case but doesn't matter in this use case so just ignoring.
+
+# Minimum password and user name lentgth. And max?
+# Minimum password and user name lentgth. And max?
+# Minimum password and user name lentgth. And max?
+# Also in change pass.
+@app.post("/account/create")
+def create_account(data: dict):
+    try:
+        username = data.get("username")
+        password = data.get("password")
+        if (username and password):
+            # Validate lengths
+            if (len(password) < 6):
+                raise HTTPException(status_code=400, detail="The password is too short. Minimum allowed length is 6.")
+            elif len(password > 256):
+                raise HTTPException(status_code=400, detail="The password is too long. Maxiumum allowed length is 256.")
+
+            if len(username < 4):
+                raise HTTPException(status_code=400, detail="The username is too short. Minimum allowed length is 4.")
+            elif len(username > 128):
+                raise HTTPException(status_code=400, detail="The username is too long. Maxiumum allowed length is 128.")
+
+
+            check_for_same_name_query = """
+                SELECT user_id 
+                FROM users
+                WHERE username = %s
+            """
+            check_for_same_name_params = (username,)
+            check_for_same_name_result = query_mysql(check_for_same_name_query, check_for_same_name_params)
+
+            if (check_for_same_name_result):
+                create_user_query = """
+                    INSERT INTO users (username, password)
+                    VALUES (%s, %s);
+                """
+                create_user_params = (username, password)
+                query_mysql(create_user_query, create_user_params)
+                return {"message": "Account created successfully!"}
+            
+            else:
+                raise HTTPException(status_code=400, detail="The username is already taken.")
+        
+        else:
+            raise HTTPException(status_code=400, detail="Missing username or password.")
+
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+    
+
+@app.post("/account/change_password")
+def change_password(data: dict):
+    try:
+        user_id = validateSessionKey(data.get("session_key"), True)
+        password_old = data.get("password_old")
+        password_new = data.get("password_new")
+        if (password_old and password_new):
+
+            if (len(password_new) < 6):
+                raise HTTPException(status_code=400, detail="The password is too short. Minimum allowed length is 6.")
+            elif len(password_new > 256):
+                raise HTTPException(status_code=400, detail="The password is too long. Maxiumum allowed length is 256.")
+
+            change_password_query = """
+                UPDATE users
+                SET password = %s
+                WHERE user_id = %s AND password = %s;
+            """
+            change_password_params = (password_new, user_id, password_old)
+            affected_rows = query_mysql(change_password_query, change_password_params)
+            if affected_rows == 0:
+                raise HTTPException(status_code=400, detail="Invalid password!")
+
+            return {"message": "Account created successfully!"}
+        
+        else:
+            raise HTTPException(status_code=400, detail="Missing password.")
+
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+# The password should be asked twice etc on the front end but I guess on the backend we should just do the thing.
+@app.post("/account/delete")
+def delete_account(data: dict):
+    try:
+        user_id = validateSessionKey(data.get("session_key"), True)
+        password = data.get("password")
+
+        if password:
+            delete_user_query = """
+                DELETE FROM users 
+                WHERE user_id = %s AND password = %s;
+            """
+            delete_user_params = (user_id, password)
+            affected_rows = query_mysql(delete_user_query, delete_user_params)
+
+            if affected_rows == 0:
+                raise HTTPException(status_code=400, detail="Incorrect password.")
+
+            return {"message": "Your account and all the data related to it has been successfully deleted!"}
+
+        raise HTTPException(status_code=400, detail="Missing password.")
+
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 # - - - - - - - - - - - - -  - - - - - - - #
@@ -335,7 +458,7 @@ def new_transaction(data: dict):
 
         # Insert the transaction into the transactions table
         transaction_query = (
-            "INSERT INTO transactions (direction, date, counterparty, notes, userID) "
+            "INSERT INTO transactions (direction, date, counterparty, notes, user_id) "
             "VALUES (%s, %s, %s, %s, %s)"
         )
         transaction_id = query_mysql(transaction_query, (direction, date, counterparty, notes, user_id), True)
@@ -373,7 +496,7 @@ def edit_transaction(data: dict):
         user_id = validateSessionKey(session_key, True)
 
         # Extract transaction data
-        transaction_id = data.get("transactionID")
+        transaction_id = data.get("transaction_id")
         direction = data.get("direction")
         date = data.get("date")
         counterparty = data.get("counterparty")
@@ -387,7 +510,7 @@ def edit_transaction(data: dict):
             raise HTTPException(status_code=400, detail="Missing required transaction fields.")
 
         # Check if the transaction exists and belongs to the user
-        transaction_query = "SELECT * FROM transactions WHERE transactionID = %s AND userID = %s"
+        transaction_query = "SELECT * FROM transactions WHERE transaction_id = %s AND user_id = %s"
         transaction_result = query_mysql(transaction_query, (transaction_id, user_id))
         if not transaction_result:
             raise HTTPException(status_code=403, detail="Transaction not found or not owned by the user.")
@@ -395,7 +518,7 @@ def edit_transaction(data: dict):
         # Update the transaction in the transactions table
         update_transaction_query = (
             "UPDATE transactions SET direction = %s, date = %s, counterparty = %s, notes = %s "
-            "WHERE transactionID = %s AND userID = %s"
+            "WHERE transaction_id = %s AND user_id = %s"
         )
         query_mysql(update_transaction_query, (direction, date, counterparty, notes, transaction_id, user_id))
 
@@ -434,14 +557,14 @@ def delete_transaction(data: dict):
         user_id = validateSessionKey(session_key, True)
 
         # Extract transaction data
-        transaction_id = data.get("transactionID")
+        transaction_id = data.get("transaction_id")
 
         # Validate required fields
         if not transaction_id:
             raise HTTPException(status_code=400, detail="Transaction ID is required.")
 
         # Check if the transaction exists and belongs to the user
-        transaction_query = "SELECT * FROM transactions WHERE transactionID = %s AND userID = %s"
+        transaction_query = "SELECT * FROM transactions WHERE transaction_id = %s AND user_id = %s"
         transaction_result = query_mysql(transaction_query, (transaction_id, user_id))
         if not transaction_result:
             raise HTTPException(status_code=403, detail="Transaction not found or not owned by the user.")
@@ -451,7 +574,7 @@ def delete_transaction(data: dict):
         query_mysql(delete_items_query, (transaction_id,))
 
         # Delete the transaction
-        delete_transaction_query = "DELETE FROM transactions WHERE transactionID = %s AND userID = %s"
+        delete_transaction_query = "DELETE FROM transactions WHERE transaction_id = %s AND user_id = %s"
         query_mysql(delete_transaction_query, (transaction_id, user_id))
 
         return {"deleteTransactionSuccess": True}
@@ -479,11 +602,11 @@ def get_transactions(
     session_key: str = Query(None)
 ):
     # Validate the session key
-    userID = validateSessionKey(session_key, False)
+    user_id = validateSessionKey(session_key, False)
 
     # Initialize filters and parameters
-    filters = ["t.userID = %s"]
-    params = [userID]
+    filters = ["t.user_id = %s"]
+    params = [user_id]
 
     # Use the appropriate timezone (e.g., Europe/Helsinki)
     local_timezone = ZoneInfo("Europe/Helsinki")
@@ -505,10 +628,10 @@ def get_transactions(
     # Amount filters
     if min_amount is not None or max_amount is not None:
         amount_filter = """
-            t.transactionID IN (
+            t.transaction_id IN (
                 SELECT ti.transactionID
                 FROM transaction_items ti
-                LEFT JOIN transactions t2 ON ti.transactionID = t2.transactionID
+                LEFT JOIN transactions t2 ON ti.transactionID = t2.transaction_id
                 GROUP BY ti.transactionID
                 HAVING SUM(CASE WHEN t2.direction = 'expense' THEN -ti.amount ELSE ti.amount END)
         """
@@ -541,37 +664,37 @@ def get_transactions(
     # Construct query
     if sort_by == "amount":
         transaction_query = f"""
-            SELECT t.transactionID
+            SELECT t.transaction_id
             FROM transactions t
-            LEFT JOIN transaction_items ti ON t.transactionID = ti.transactionID
+            LEFT JOIN transaction_items ti ON t.transaction_id = ti.transactionID
             {where_clause}
-            GROUP BY t.transactionID
+            GROUP BY t.transaction_id
             ORDER BY SUM(CASE WHEN t.direction = 'expense' THEN -ti.amount ELSE ti.amount END) {sort_order}
             LIMIT %s OFFSET %s
         """
     elif sort_by == "category":
         transaction_query = f"""
-            SELECT t.transactionID
+            SELECT t.transaction_id
             FROM transactions t
-            LEFT JOIN transaction_items ti ON t.transactionID = ti.transactionID
+            LEFT JOIN transaction_items ti ON t.transaction_id = ti.transactionID
             LEFT JOIN (
                 SELECT transactionID,
-                    GROUP_CONCAT(category ORDER BY itemID) AS category
+                    GROUP_CONCAT(category ORDER BY item_id) AS category
                 FROM transaction_items
                 GROUP BY transactionID
-            ) AS first_category ON t.transactionID = first_category.transactionID
+            ) AS first_category ON t.transaction_id = first_category.transactionID
             {where_clause}
-            GROUP BY t.transactionID
+            GROUP BY t.transaction_id
             ORDER BY first_category.category {sort_order}
             LIMIT %s OFFSET %s
         """
     else:
         transaction_query = f"""
-            SELECT t.transactionID
+            SELECT t.transaction_id
             FROM transactions t
-            LEFT JOIN transaction_items ti ON t.transactionID = ti.transactionID
+            LEFT JOIN transaction_items ti ON t.transaction_id = ti.transactionID
             {where_clause}
-            GROUP BY t.transactionID
+            GROUP BY t.transaction_id
             ORDER BY {sort_by} {sort_order}
             LIMIT %s OFFSET %s
         """
@@ -590,20 +713,20 @@ def get_transactions(
     # Fetch transaction items
     placeholders = ','.join(['%s'] * len(transaction_ids_list))
     items_query = f"""
-        SELECT t.transactionID, t.direction, t.date, t.counterparty, t.notes, ti.category, ti.amount
+        SELECT t.transaction_id, t.direction, t.date, t.counterparty, t.notes, ti.category, ti.amount
         FROM transactions t
-        LEFT JOIN transaction_items ti ON t.transactionID = ti.transactionID
-        WHERE t.transactionID IN ({placeholders})
-        ORDER BY FIELD(t.transactionID, {','.join(['%s'] * len(transaction_ids_list))})
+        LEFT JOIN transaction_items ti ON t.transaction_id = ti.transactionID
+        WHERE t.transaction_id IN ({placeholders})
+        ORDER BY FIELD(t.transaction_id, {','.join(['%s'] * len(transaction_ids_list))})
     """
     items_params = transaction_ids_list + transaction_ids_list
     transactions_items = query_mysql(items_query, items_params)
 
     # Query for the total amount of transactions that match our filters and compare to the limit
     total_query = f"""
-        SELECT COUNT(DISTINCT t.transactionID)
+        SELECT COUNT(DISTINCT t.transaction_id)
         FROM transactions t
-        LEFT JOIN transaction_items ti ON t.transactionID = ti.transactionID
+        LEFT JOIN transaction_items ti ON t.transaction_id = ti.transactionID
         {where_clause}
     """
     # Make a copy of the params list and remove the limit and offset
@@ -615,10 +738,10 @@ def get_transactions(
     # Organize and process transactions
     transactions_dict = {}
     for transaction in transactions_items:
-        transactionID = transaction[0]
-        if transactionID not in transactions_dict:
-            transactions_dict[transactionID] = {
-                "transactionID": transactionID,
+        transaction_id = transaction[0]
+        if transaction_id not in transactions_dict:
+            transactions_dict[transaction_id] = {
+                "transaction_id": transaction_id,
                 "direction": transaction[1],
                 "date": transaction[2],
                 "counterparty": transaction[3],
@@ -626,7 +749,7 @@ def get_transactions(
                 "categories": [],
                 "amount_sum": 0,
             }
-        transactions_dict[transactionID]["categories"].append({
+        transactions_dict[transaction_id]["categories"].append({
             "category": transaction[5],
             "amount": transaction[6]
         })
@@ -648,31 +771,31 @@ def get_options(
     session_key: str = Query(None)
 ):
     # Validate the session key
-    userID = validateSessionKey(session_key, False)
+    user_id = validateSessionKey(session_key, False)
 
     # Counterparty query 
     counterparty_query = """
         SELECT counterparty, direction
         FROM transactions
-        WHERE userID = %s
+        WHERE user_id = %s
         GROUP BY counterparty, direction
         ORDER BY COUNT(*) DESC;
     """
-    counterpartyValuesObject = query_mysql(counterparty_query, (userID,))
+    counterpartyValuesObject = query_mysql(counterparty_query, (user_id,))
     # Split into expense and income arrays based on the direction
     counterpartyExpense = [row[0] for row in counterpartyValuesObject if row[1] == "expense"]
     counterpartyIncome = [row[0] for row in counterpartyValuesObject if row[1] == "income"]
 
-    # Category query with userID filter
+    # Category query with user_id filter
     category_query = """
         SELECT ti.category, t.direction
         FROM transaction_items ti
-        JOIN transactions t ON ti.transactionID = t.transactionID
-        WHERE t.userID = %s
+        JOIN transactions t ON ti.transactionID = t.transaction_id
+        WHERE t.user_id = %s
         GROUP BY ti.category, t.direction
         ORDER BY COUNT(*) DESC;
     """
-    categoryValuesObject = query_mysql(category_query, (userID,))
+    categoryValuesObject = query_mysql(category_query, (user_id,))
     # Split into expense and income arrays based on the direction
     categoryExpense = [row[0] for row in categoryValuesObject if row[1] == "expense"]
     categoryIncome = [row[0] for row in categoryValuesObject if row[1] == "income"]
@@ -687,32 +810,32 @@ def get_filters(
 ):
 
     # Validate the session key
-    userID = validateSessionKey(session_key, False)
+    user_id = validateSessionKey(session_key, False)
 
     try:
-        # Counterparty query with userID filter
+        # Counterparty query with user_id filter
         counterparty_query = """
             SELECT counterparty, direction
             FROM transactions
-            WHERE userID = %s
+            WHERE user_id = %s
             GROUP BY counterparty, direction
             ORDER BY COUNT(*) DESC;
         """
-        counterpartyValuesObject = query_mysql(counterparty_query, (userID,))
+        counterpartyValuesObject = query_mysql(counterparty_query, (user_id,))
         # Split into expense and income arrays based on the direction
         counterpartyExpense = [row[0] for row in counterpartyValuesObject if row[1] == "expense"]
         counterpartyIncome = [row[0] for row in counterpartyValuesObject if row[1] == "income"]
 
-        # Category query with userID filter
+        # Category query with user_id filter
         category_query = """
             SELECT ti.category, t.direction
             FROM transaction_items ti
-            JOIN transactions t ON ti.transactionID = t.transactionID
-            WHERE t.userID = %s
+            JOIN transactions t ON ti.transactionID = t.transaction_id
+            WHERE t.user_id = %s
             GROUP BY ti.category, t.direction
             ORDER BY COUNT(*) DESC;
         """
-        categoryValuesObject = query_mysql(category_query, (userID,))
+        categoryValuesObject = query_mysql(category_query, (user_id,))
         # Split into expense and income arrays based on the direction
         categoryExpense = [row[0] for row in categoryValuesObject if row[1] == "expense"]
         categoryIncome = [row[0] for row in categoryValuesObject if row[1] == "income"]
@@ -723,28 +846,28 @@ def get_filters(
                 UNIX_TIMESTAMP(MIN(date)) AS minDate, 
                 UNIX_TIMESTAMP(MAX(date)) AS maxDate
             FROM transactions
-            WHERE userID = %s;
+            WHERE user_id = %s;
         """
-        dateValues = query_mysql(date_query, (userID,))
+        dateValues = query_mysql(date_query, (user_id,))
         minDate = dateValues[0][0]
         maxDate = dateValues[0][1]
 
-        # Query for max and min amounts, adjusting for direction, with userID filter
+        # Query for max and min amounts, adjusting for direction, with user_id filter
         amount_query = """
             SELECT MAX(adjusted_amount) AS maxAmount, MIN(adjusted_amount) AS minAmount
             FROM (
-                SELECT t.transactionID, 
+                SELECT t.transaction_id, 
                     SUM(CASE 
                         WHEN t.direction = 'expense' THEN -ti.amount
                         WHEN t.direction = 'income' THEN ti.amount
                     END) AS adjusted_amount
                 FROM transaction_items ti
-                JOIN transactions t ON ti.transactionID = t.transactionID
-                WHERE t.userID = %s
-                GROUP BY t.transactionID
+                JOIN transactions t ON ti.transactionID = t.transaction_id
+                WHERE t.user_id = %s
+                GROUP BY t.transaction_id
             ) AS transaction_totals;
         """
-        amountValues = query_mysql(amount_query, (userID,))
+        amountValues = query_mysql(amount_query, (user_id,))
         minAmount = amountValues[0][1]
         maxAmount = amountValues[0][0]
 
@@ -795,9 +918,9 @@ def get_chart_balance_over_time(
                 FROM 
                     transactions t
                 JOIN 
-                    transaction_items ti ON t.transactionID = ti.transactionID
+                    transaction_items ti ON t.transaction_id = ti.transactionID
                 WHERE 
-                    t.userID = %s
+                    t.user_id = %s
                 GROUP BY 
                     t.date
                 ORDER BY 
@@ -867,9 +990,9 @@ def get_chart_sum_by_month(
             FROM 
                 transactions t
             JOIN 
-                transaction_items ti ON t.transactionID = ti.transactionID
+                transaction_items ti ON t.transaction_id = ti.transactionID
             WHERE 
-                t.userID = %s
+                t.user_id = %s
             GROUP BY 
                 month
             ORDER BY 
@@ -909,7 +1032,7 @@ def get_chart_categories_monthly(
         # Query for min and max dates across both directions
         date_range_query = """
             SELECT MIN(DATE_FORMAT(date, '%Y-%m')), MAX(DATE_FORMAT(date, '%Y-%m'))
-            FROM transactions WHERE userID = %s;
+            FROM transactions WHERE user_id = %s;
         """
         date_range_result = query_mysql(date_range_query, (user_id,))
         first_month, last_month = date_range_result[0] if date_range_result else (None, None)
@@ -923,8 +1046,8 @@ def get_chart_categories_monthly(
                 ti.category,
                 SUM(ti.amount) AS total_expense
             FROM transactions t
-            JOIN transaction_items ti ON t.transactionID = ti.transactionID
-            WHERE t.userID = %s AND t.direction = %s
+            JOIN transaction_items ti ON t.transaction_id = ti.transactionID
+            WHERE t.user_id = %s AND t.direction = %s
             GROUP BY month, ti.category
             ORDER BY month, ti.category;
         """
@@ -993,9 +1116,9 @@ def analytics_get_general_stats(
             FROM 
                 transactions t
             JOIN 
-                transaction_items ti ON t.transactionID = ti.transactionID
+                transaction_items ti ON t.transaction_id = ti.transactionID
             WHERE 
-                t.userID = %s
+                t.user_id = %s
         """
         general_stats_result = query_mysql(general_stats_query, (user_id,))
 
@@ -1073,9 +1196,9 @@ def analytics_get_last_timespan_stats(
             FROM 
                 transactions t
             JOIN 
-                transaction_items ti ON t.transactionID = ti.transactionID
+                transaction_items ti ON t.transaction_id = ti.transactionID
             WHERE 
-                t.userID = %s AND {date_condition}
+                t.user_id = %s AND {date_condition}
         """
         stats_result = query_mysql(stats_query, (user_id,))
 
@@ -1087,9 +1210,9 @@ def analytics_get_last_timespan_stats(
             FROM 
                 transactions t
             JOIN 
-                transaction_items ti ON t.transactionID = ti.transactionID
+                transaction_items ti ON t.transaction_id = ti.transactionID
             WHERE 
-                t.userID = %s AND {date_condition};
+                t.user_id = %s AND {date_condition};
         """
         ratio_result = query_mysql(ratio_query, (user_id,))
 
@@ -1101,9 +1224,9 @@ def analytics_get_last_timespan_stats(
         #     FROM 
         #         transactions t
         #     JOIN 
-        #         transaction_items ti ON t.transactionID = ti.transactionID
+        #         transaction_items ti ON t.transaction_id = ti.transactionID
         #     WHERE 
-        #         t.userID = %s AND t.direction = 'expense' AND {date_condition}
+        #         t.user_id = %s AND t.direction = 'expense' AND {date_condition}
         #     GROUP BY 
         #         ti.category
         #     ORDER BY 
@@ -1119,9 +1242,9 @@ def analytics_get_last_timespan_stats(
             FROM 
                 transactions t
             JOIN 
-                transaction_items ti ON t.transactionID = ti.transactionID
+                transaction_items ti ON t.transaction_id = ti.transactionID
             WHERE 
-                t.userID = %s AND t.direction = 'expense' AND {date_condition}
+                t.user_id = %s AND t.direction = 'expense' AND {date_condition}
             GROUP BY 
                 ti.category
             ORDER BY 
@@ -1358,18 +1481,16 @@ def store_server_resource_logs(data: dict):
                 cpu_temperature,
                 cpu_usage,
                 ram_usage,
-                disk_usage,
                 system_load,
                 network_sent_bytes,
                 network_recv_bytes
             ) 
-            VALUES (%s, %s, %s, %s, %s, %s, %s);
+            VALUES (%s, %s, %s, %s, %s, %s);
         """
         store_data_params = (
             data["cpu_temperature"],
             data["cpu_usage"],
             data["ram_usage"],
-            data["disk_usage"],
             data["system_load"],
             data["network_sent_bytes"],
             data["network_recv_bytes"],
@@ -1401,7 +1522,6 @@ def get_server_resource_logs(timeframe: str = Query(None)):
                 cpu_temperature,
                 cpu_usage,
                 ram_usage,
-                disk_usage,
                 system_load,
                 network_sent_bytes,
                 network_recv_bytes,
@@ -1413,23 +1533,196 @@ def get_server_resource_logs(timeframe: str = Query(None)):
         # Execute the query and fetch the result
         server_data_result = query_mysql(server_data_query, ())
 
-        # Format the results so that we have objects instead of arrays
-        formatted_data = [
-            {
+        # Format the results and normalize timestamps to minute precision
+        formatted_data = []
+        for result in server_data_result:
+            # Normalize timestamp to minute (ignoring seconds and milliseconds)
+            timestamp_minute = result[6].replace(second=0, microsecond=0)
+            formatted_data.append({
                 "cpu_temperature": result[0],
                 "cpu_usage": result[1],
                 "ram_usage": result[2],
-                "disk_usage": result[3],
-                "system_load": result[4],
-                "network_sent_bytes": result[5],
-                "network_recv_bytes": result[6],
-                "timestamp": result[7]
-            } 
-            for result in server_data_result
-        ]
+                "system_load": result[3],
+                "network_sent_bytes": result[4],
+                "network_recv_bytes": result[5],
+                "timestamp": timestamp_minute
+            })
         
-        return {"data": formatted_data}
+        # Get the first and last timestamps from the result
+        if formatted_data:
+            start_time = formatted_data[0]['timestamp']
+            end_time = formatted_data[-1]['timestamp']
+        else:
+            return {"data": []}
+
+        # Generate the full range of minutes from start to end
+        current_time = start_time
+        complete_data = []
+        
+        while current_time <= end_time:
+            # Check if we have a log entry for the current minute
+            matching_data = next((data for data in formatted_data if data['timestamp'] == current_time), None)
+            
+            if matching_data:
+                complete_data.append(matching_data)
+            else:
+                # If no entry exists, append an entry with zero values
+                complete_data.append({
+                    "cpu_temperature": 0,
+                    "cpu_usage": 0,
+                    "ram_usage": 0,
+                    "system_load": 0,
+                    "network_sent_bytes": complete_data[-1]["network_sent_bytes"],
+                    "network_recv_bytes": complete_data[-1]["network_recv_bytes"],
+                    "timestamp": current_time
+                })
+            
+            # Move to the next minute
+            current_time += timedelta(minutes=1)
+        
+        return {"data": complete_data}
     
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/get_fastapi_request_log_data")
+def get_fastapi_request_data(timeframe: str = Query(None)):
+    try:
+        # Validate timeframe
+        interval_map = {"24h": "24 HOUR", "7d": "7 DAY", "30d": "30 DAY"}
+        if timeframe not in interval_map:
+            raise HTTPException(status_code=400, detail="Invalid timeframe")
+        interval = interval_map[timeframe]
+
+        # Fetch logs from the database
+        query = f"""
+            SELECT status_code, method, endpoint, client_ip, backend_time_ms, UNIX_TIMESTAMP(timestamp) DIV 60 AS minute_bucket
+            FROM server_fastapi_request_logs
+            WHERE timestamp >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL {interval})
+        """
+        results = query_mysql(query, ())
+
+        # Initialize data structures
+        status_count = defaultdict(int)
+        method_count = defaultdict(int)
+        endpoint_count = defaultdict(int)
+        client_ip_count = defaultdict(int)
+        minute_buckets = defaultdict(int)
+        backend_times = []
+        endpoint_times = defaultdict(lambda: {"total_time": 0, "count": 0})
+
+        # Track error codes per endpoint (for 400s and 500s)
+        endpoint_error_codes = defaultdict(lambda: defaultdict(int))
+
+        total_requests = 0
+        total_backend_time = 0
+
+        # Process logs
+        for row in results:
+            status_code, method, endpoint, client_ip, backend_time_ms, minute_bucket = row
+            if endpoint == "/store_server_resource_logs":
+                continue  # Skip this endpoint
+
+            status_count[status_code] += 1
+            method_count[method] += 1
+            endpoint_count[endpoint] += 1
+            client_ip_count[client_ip] += 1
+            minute_buckets[minute_bucket] += 1
+
+            total_requests += 1
+            total_backend_time += backend_time_ms or 0
+
+            if backend_time_ms is not None:
+                backend_times.append(backend_time_ms)
+                endpoint_times[endpoint]["total_time"] += backend_time_ms
+                endpoint_times[endpoint]["count"] += 1
+
+            # Track error codes for endpoints (400s and 500s)
+            if 400 <= status_code < 600:
+                endpoint_error_codes[endpoint][status_code] += 1
+
+        # Calculate backend time histogram
+        bucket_size = 50
+        max_bucket = 1000
+        buckets = [(i * bucket_size, (i + 1) * bucket_size) for i in range(max_bucket // bucket_size)]
+        buckets.append((max_bucket, 600000))
+
+        histogram = defaultdict(int)
+        for time in backend_times:
+            for i, (start, end) in enumerate(buckets):
+                if start <= time < end:
+                    histogram[i] += 1
+                    break
+
+        histogram_data = [
+            {
+                "time_range": f"{start}ms - {end}ms" if i < len(buckets) - 1 else f"{start}ms and up",
+                "count": histogram[i]
+            }
+            for i, (start, end) in enumerate(buckets)
+        ]
+
+
+        # Fill missing minute buckets
+        min_bucket = min(minute_buckets.keys(), default=0)
+        max_bucket = max(minute_buckets.keys(), default=0)
+        filled_minute_buckets = [
+            {"minute_bucket": minute, "count": minute_buckets.get(minute, 0)}
+            for minute in range(min_bucket, max_bucket + 1)
+        ]
+
+        # Calculate average backend time
+        avg_backend_time = total_backend_time / total_requests if total_requests else 0
+
+        # Prepare endpoint error summary
+        endpoint_error_summary = []
+        for endpoint, codes in endpoint_error_codes.items():
+            error_counts = [{"status_code": code, "count": count} for code, count in codes.items()]
+            endpoint_error_summary.append({
+                "endpoint": endpoint,
+                "errors": sorted(error_counts, key=lambda x: x['count'], reverse=True)
+            })
+
+        # Prepare response data
+        return {
+            "data": {
+                "total_requests": total_requests,
+                "avg_backend_time": avg_backend_time,
+                "status_code": sorted(
+                    [{"status_code": k, "count": v} for k, v in status_count.items()],
+                    key=lambda x: x['count'], reverse=True
+                ),
+                "method_count": sorted(
+                    [{"method": k, "count": v} for k, v in method_count.items()],
+                    key=lambda x: x['count'], reverse=True
+                ),
+                "client_ip_count": sorted(
+                    [{"client_ip": k, "count": v} for k, v in client_ip_count.items()],
+                    key=lambda x: x['count'], reverse=True
+                ),
+                "endpoint_count": sorted(
+                    [
+                        {
+                            "endpoint": endpoint,
+                            "count": count,
+                            "avg_response_time_ms": round(endpoint_times[endpoint]["total_time"] / endpoint_times[endpoint]["count"])
+                            if endpoint in endpoint_times and endpoint_times[endpoint]["count"] > 0
+                            else 0
+                        }
+                        for endpoint, count in endpoint_count.items()
+                    ],
+                    key=lambda x: x['count'], reverse=True
+                ),
+                "requests_over_time": filled_minute_buckets,
+                "backend_time_histogram": histogram_data,
+                "endpoint_error_summary": sorted(
+                    endpoint_error_summary, key=lambda x: sum(err["count"] for err in x["errors"]), reverse=True
+                ),
+            }
+        }
+
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -1531,7 +1824,7 @@ def watch_list_search(
             SELECT t.tmdb_id, t.title_id
             FROM user_title_details utd
             JOIN titles t ON utd.title_id = t.title_id
-            WHERE utd.userID = %s AND t.tmdb_id IN ({placeholders})
+            WHERE utd.user_id = %s AND t.tmdb_id IN ({placeholders})
         """
         watchlist_data = query_mysql(watchlist_query, (user_id, *tmdb_ids))
         watchlist_dict = {row[0]: row[1] for row in watchlist_data}
@@ -1752,7 +2045,6 @@ async def add_or_update_movie_title(title_tmdb_id):
                 movie_title_age_rating = us_movie_title_age_rating
             else:
                 movie_title_age_rating = None
-
 
         # Retrieve the youtube trailer key
         movie_title_trailer_key = None
@@ -2045,7 +2337,6 @@ async def add_title(data: dict):
         """
         title_id = query_mysql(check_title_query, (title_tmdb_id,))
 
-
         # Add the title to the titles if it doesn't exist
         if not title_id:
             # Get and validate the type
@@ -2070,13 +2361,16 @@ async def add_title(data: dict):
 
         # Add the link between the title and the user
         link_user_query = """
-            INSERT INTO user_title_details (userID, title_id)
+            INSERT INTO user_title_details (user_id, title_id)
             VALUES(%s, %s)
         """
         query_mysql(link_user_query, (user_id, title_id))
 
         # If the query doesn't throw an error return success
-        return {"success": True}
+        return {
+            "success": True,
+            "title_id": title_id
+        }
 
     except HTTPException as e:
         raise e
@@ -2131,7 +2425,7 @@ def remove_title(data: dict):
         remove_query = """
             DELETE user_title_details FROM user_title_details
             JOIN titles ON user_title_details.title_id = titles.title_id
-            WHERE user_title_details.userID = %s AND titles.tmdb_id = %s
+            WHERE user_title_details.user_id = %s AND titles.tmdb_id = %s
         """
         query_mysql(remove_query, (user_id, title_tmdb_id))
 
@@ -2140,7 +2434,7 @@ def remove_title(data: dict):
             DELETE user_episode_details
             FROM user_episode_details
             JOIN episodes ON user_episode_details.episode_id = episodes.episode_id
-            WHERE user_episode_details.userID = %s AND episodes.title_id = (
+            WHERE user_episode_details.user_id = %s AND episodes.title_id = (
                 SELECT title_id FROM titles WHERE tmdb_id = %s
             )
         """
@@ -2171,7 +2465,7 @@ def save_user_title_notes(data: dict):
         save_notes_query = """
             UPDATE user_title_details
             SET notes = %s
-            WHERE userID = %s AND title_id = %s
+            WHERE user_id = %s AND title_id = %s
         """
         query_mysql(save_notes_query, (notes, user_id, title_id))
 
@@ -2197,7 +2491,7 @@ def toggle_title_favourite(data: dict):
         
         # Remove title from user's watch list
         save_notes_query = """
-            INSERT INTO user_title_details (userID, title_id, favourite)
+            INSERT INTO user_title_details (user_id, title_id, favourite)
             VALUES (%s, %s, NOT favourite)
             ON DUPLICATE KEY UPDATE favourite = NOT favourite
         """
@@ -2245,7 +2539,7 @@ def keep_title_watch_count_up_to_date(user_id, title_id=None, season_id=None, ep
         check_all_watched_query = """
             SELECT COUNT(*) 
             FROM episodes e
-            LEFT JOIN user_episode_details ued ON e.episode_id = ued.episode_id AND ued.userID = %s
+            LEFT JOIN user_episode_details ued ON e.episode_id = ued.episode_id AND ued.user_id = %s
             WHERE e.title_id = %s
             AND (ued.watch_count IS NULL OR ued.watch_count = 0)
         """
@@ -2256,7 +2550,7 @@ def keep_title_watch_count_up_to_date(user_id, title_id=None, season_id=None, ep
         
         # Update the title's watch_count based on the check
         update_title_watch_count_query = """
-            INSERT INTO user_title_details (userID, title_id, watch_count)
+            INSERT INTO user_title_details (user_id, title_id, watch_count)
             VALUES (%s, %s, %s)
             ON DUPLICATE KEY UPDATE watch_count = %s
         """
@@ -2270,7 +2564,7 @@ def get_updated_user_title_data(user_id: int, title_id: int):
         title_query = """
             SELECT utd.watch_count
             FROM user_title_details utd
-            WHERE utd.userID = %s AND utd.title_id = %s
+            WHERE utd.user_id = %s AND utd.title_id = %s
         """
         title_info = query_mysql(title_query, (user_id, title_id))
 
@@ -2283,7 +2577,7 @@ def get_updated_user_title_data(user_id: int, title_id: int):
                 SELECT e.episode_id, e.episode_name, ued.watch_count
                 FROM episodes e
                 LEFT JOIN user_episode_details ued 
-                    ON e.episode_id = ued.episode_id AND ued.userID = %s
+                    ON e.episode_id = ued.episode_id AND ued.user_id = %s
                 WHERE e.title_id = %s
             """
             episode_info = query_mysql(episode_query, (user_id, title_id))
@@ -2325,7 +2619,7 @@ def modify_title_watch_count(data: dict):
 
         if type == "movie":
             title_query = """
-                INSERT INTO user_title_details (userID, title_id, watch_count)
+                INSERT INTO user_title_details (user_id, title_id, watch_count)
                 VALUES (%s, %s, %s)
                 ON DUPLICATE KEY UPDATE watch_count = VALUES(watch_count)
             """
@@ -2333,7 +2627,7 @@ def modify_title_watch_count(data: dict):
 
         elif type == "tv":
             episode_query = """
-                INSERT INTO user_episode_details (userID, episode_id, watch_count)
+                INSERT INTO user_episode_details (user_id, episode_id, watch_count)
                 SELECT %s, episode_id, %s
                 FROM episodes
                 WHERE title_id = %s
@@ -2346,7 +2640,7 @@ def modify_title_watch_count(data: dict):
 
         elif type == "season":
             episode_query = """
-                INSERT INTO user_episode_details (userID, episode_id, watch_count)
+                INSERT INTO user_episode_details (user_id, episode_id, watch_count)
                 SELECT %s, episode_id, %s
                 FROM episodes
                 WHERE season_id = %s
@@ -2359,7 +2653,7 @@ def modify_title_watch_count(data: dict):
 
         elif type == "episode":
             episode_query = """
-                INSERT INTO user_episode_details (userID, episode_id, watch_count)
+                INSERT INTO user_episode_details (user_id, episode_id, watch_count)
                 VALUES (%s, %s, %s)
                 ON DUPLICATE KEY UPDATE watch_count = VALUES(watch_count)
             """
@@ -2434,9 +2728,9 @@ def get_title_cards(
         LEFT JOIN 
             episodes e ON e.season_id = s.season_id
         LEFT JOIN 
-            user_episode_details ued ON ued.userID = utd.userID AND ued.episode_id = e.episode_id
+            user_episode_details ued ON ued.user_id = utd.user_id AND ued.episode_id = e.episode_id
         WHERE 
-            utd.userID = %s
+            utd.user_id = %s
     """
 
     query_params = [user_id]
@@ -2471,7 +2765,7 @@ def get_title_cards(
                 SELECT 1 
                 FROM user_episode_details ued 
                 JOIN episodes e ON ued.episode_id = e.episode_id 
-                WHERE ued.userID = utd.userID 
+                WHERE ued.user_id = utd.user_id 
                 AND e.title_id = t.title_id 
                 AND ued.watch_count > 0
                 LIMIT 1
@@ -2483,7 +2777,7 @@ def get_title_cards(
                 SELECT 1 
                 FROM user_episode_details ued 
                 JOIN episodes e ON ued.episode_id = e.episode_id 
-                WHERE ued.userID = utd.userID 
+                WHERE ued.user_id = utd.user_id 
                 AND e.title_id = t.title_id 
                 AND ued.watch_count > 0
                 LIMIT 1
@@ -2577,7 +2871,7 @@ def get_title_info(
     check_watchlist_query = """
         SELECT 1
         FROM user_title_details
-        WHERE userID = %s AND title_id = %s
+        WHERE user_id = %s AND title_id = %s
     """
     watchlist_exists = query_mysql(check_watchlist_query, (user_id, title_id))
 
@@ -2612,7 +2906,7 @@ def get_title_info(
             JOIN titles t ON utd.title_id = t.title_id
             LEFT JOIN title_genres tg ON t.title_id = tg.title_id
             LEFT JOIN genres g ON tg.genre_id = g.genre_id
-            WHERE utd.userID = %s AND utd.title_id = %s
+            WHERE utd.user_id = %s AND utd.title_id = %s
             GROUP BY t.title_id, utd.watch_count, utd.notes, utd.last_updated;
         """
         title_query_results = query_mysql(get_titles_query, (user_id, title_id))[0]
@@ -2727,7 +3021,7 @@ def get_title_info(
             FROM episodes e
             LEFT JOIN user_episode_details ued 
                 ON e.episode_id = ued.episode_id 
-                AND ued.userID = %s
+                AND ued.user_id = %s
             WHERE e.title_id = %s
             ORDER BY e.season_id, e.episode_number;
         """
@@ -2771,20 +3065,30 @@ def get_title_info(
 
 
 @app.get("/image/{image_path:path}")
-@app.head("/image/{image_path:path}")  # HEAD for checking if image exists. Not really used anymore but doesn't hurt to have
-async def get_image(image_path: str):
-    # Define the full image path
+@app.head("/image/{image_path:path}")
+async def get_image(image_path: str, width: int = Query(None)):
     full_path = os.path.join("/fastapi-images", image_path)
 
-    # Check if the image exists
-    if os.path.exists(full_path):
-        # If head just reutrn that it does
-        if "head" in str(get_image.__name__).lower():  # HEAD request check
-            return {"message": "Image exists"}
-        # Else return the whole image
-        return FileResponse(full_path)
-    else:
+    if not os.path.exists(full_path):
         raise HTTPException(status_code=404, detail="Image doesn't exist.")
+
+    if "head" in str(get_image.__name__).lower():
+        return {"message": "Image exists"}
+
+    if width:   
+        img = Image.open(full_path)
+        aspect_ratio = img.height / img.width
+        new_height = int(width * aspect_ratio)
+        img = img.resize((width, new_height))
+
+        img_io = BytesIO()
+        img_format = img.format or "PNG"
+        img.save(img_io, format=img_format)
+        img_io.seek(0)
+
+        return StreamingResponse(img_io, media_type=f"image/{img_format.lower()}")
+
+    return FileResponse(full_path)
 
 
 
@@ -2798,4 +3102,7 @@ async def get_image(image_path: str):
 # When updating watch count query the values for the title inside the updating endpoint and return them. 
 
 # To add:
-# production_companies (new table) and image function
+# production_companies (new table) and image function for their images
+# production_companies (new table) and image function for their images
+# production_companies (new table) and image function for their images
+# production_companies (new table) and image function for their images
