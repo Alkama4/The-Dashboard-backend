@@ -322,58 +322,57 @@ def logout(
         "logOutSuccess": True,
     }
 
-# With this it's possible to have the exact same credentials. We can't just throw an error when the password matches since then the other user would know the credentials to the other account.
-# Quite an edge case but doesn't matter in this use case so just ignoring.
 
-# Minimum password and user name lentgth. And max?
-# Minimum password and user name lentgth. And max?
-# Minimum password and user name lentgth. And max?
-# Also in change pass.
 @app.post("/account/create")
 def create_account(data: dict):
-    try:
-        username = data.get("username")
-        password = data.get("password")
-        if (username and password):
-            # Validate lengths
-            if (len(password) < 6):
-                raise HTTPException(status_code=400, detail="The password is too short. Minimum allowed length is 6.")
-            elif len(password > 256):
-                raise HTTPException(status_code=400, detail="The password is too long. Maxiumum allowed length is 256.")
 
-            if len(username < 4):
-                raise HTTPException(status_code=400, detail="The username is too short. Minimum allowed length is 4.")
-            elif len(username > 128):
-                raise HTTPException(status_code=400, detail="The username is too long. Maxiumum allowed length is 128.")
+    username = data.get("username")
+    password = data.get("password")
+    if (username and password):
+        # Validate lengths
+        if len(password) < 4:
+            raise HTTPException(status_code=400, detail="The password is too short. Minimum allowed length is 8.")
+        elif len(password) > 256:
+            raise HTTPException(status_code=400, detail="The password is too long. Maxiumum allowed length is 256.")
 
+        if len(username) < 4:
+            raise HTTPException(status_code=400, detail="The username is too short. Minimum allowed length is 4.")
+        elif len(username) > 128:
+            raise HTTPException(status_code=400, detail="The username is too long. Maxiumum allowed length is 128.")
 
-            check_for_same_name_query = """
-                SELECT user_id 
-                FROM users
-                WHERE username = %s
-            """
-            check_for_same_name_params = (username,)
-            check_for_same_name_result = query_mysql(check_for_same_name_query, check_for_same_name_params)
+        check_for_same_name_query = """
+            SELECT user_id 
+            FROM users
+            WHERE username = %s
+        """
+        check_for_same_name_params = (username,)
+        check_for_same_name_result = query_mysql(check_for_same_name_query, check_for_same_name_params)
 
-            if (check_for_same_name_result):
-                create_user_query = """
-                    INSERT INTO users (username, password)
-                    VALUES (%s, %s);
-                """
-                create_user_params = (username, password)
-                query_mysql(create_user_query, create_user_params)
-                return {"message": "Account created successfully!"}
-            
-            else:
-                raise HTTPException(status_code=400, detail="The username is already taken.")
+        if check_for_same_name_result:
+            raise HTTPException(status_code=400, detail="The username is already taken.")
         
         else:
-            raise HTTPException(status_code=400, detail="Missing username or password.")
+            # Create user in users table
+            create_user_query = """
+                INSERT INTO users (username, password)
+                VALUES (%s, %s);
+            """
+            create_user_params = (username, password)
+            user_id = query_mysql(create_user_query, create_user_params, True)
+            
+            # Initialize user settings
+            create_settings_query = """
+                INSERT INTO user_settings (user_id)
+                VALUES (%s);
+            """
+            create_settings_params = (user_id,)
+            query_mysql(create_settings_query, create_settings_params)
 
-    except Exception as e:
-        print(e)
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+            return {"message": "Account created successfully!"}
     
+    else:
+        raise HTTPException(status_code=400, detail="Missing username or password.")
+
 
 @app.post("/account/change_password")
 def change_password(data: dict):
@@ -433,6 +432,72 @@ def delete_account(data: dict):
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@app.get("/account/get_settings")
+def get_settings(session_key: str):
+    
+    # Validate the sessionkey and get the user_id
+    user_id = validateSessionKey(session_key, False)
+
+    query = """
+        SELECT transactions_load_limit, chart_balance_initial_value
+        FROM user_settings
+        WHERE user_id = %s;
+    """
+    result = query_mysql(query, (user_id,))[0]
+
+    print(result)
+
+    return {
+        "transactions_load_limit": result[0],
+        "chart_balance_initial_value": result[1],
+    }
+
+
+@app.post("/account/update_settings")
+def update_settings(data: dict):
+    # Validate the sessionkey and get the user_id
+    session_key = data.get("session_key")
+    user_id = validateSessionKey(session_key, True)
+
+    changed_settings = data.get("changed_settings")
+
+    if not changed_settings:
+        return {"message": "No settings to update"}
+
+    # Prepare the SET clause and values for the update query
+    set_clause = []
+    values = []
+
+    for setting in changed_settings:
+        setting_name = setting["setting"]
+        value = setting["value"]
+        
+        # Ensure that the setting name matches the columns in the database
+        if setting_name == "transactions_load_limit" or setting_name == "chart_balance_initial_value":
+            set_clause.append(f"{setting_name} = %s")
+            values.append(value)
+
+    # If there are no valid settings to update
+    if not set_clause:
+        return {"message": "No valid settings to update"}
+
+    # Construct the query
+    # Need to use join since the %s can't be used for column names
+    query = f"""
+        UPDATE user_settings
+        SET {', '.join(set_clause)}
+        WHERE user_id = %s;
+    """
+
+    # Add user_id to the values to pass into the query
+    values.append(user_id)
+
+    # Execute the query
+    query_mysql(query, tuple(values))
+
+    return {"message": "Settings updated successfully"}
 
 
 # - - - - - - - - - - - - -  - - - - - - - #
@@ -1129,8 +1194,8 @@ def analytics_get_general_stats(
                 "transactionsLogged": row[0],
                 "daysLogged": row[1],
                 "avgLogsPerDay": float(row[2]) if row[2] is not None else 0,
-                "totalExpenses": float(row[3]),
-                "totalIncomes": float(row[4]),
+                "totalExpenses": float(row[3]) if row[3] is not None else 0,
+                "totalIncomes": float(row[4]) if row[4] is not None else 0,
             }
             return {"generalStats": result}
 
