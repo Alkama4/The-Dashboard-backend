@@ -173,6 +173,8 @@ def add_to_cache(key, value):
 # Used to log request for analysis
 @app.middleware("http")
 async def log_request_data(request: Request, call_next):
+
+    # Get values for the log
     start_time = time.time()
     response = await call_next(request)
     process_time = time.time() - start_time
@@ -181,6 +183,7 @@ async def log_request_data(request: Request, call_next):
     client_ip = request.client.host
     method = request.method
 
+    # Push the data to mysql
     insert_query = """
     INSERT INTO server_fastapi_request_logs (endpoint, status_code, backend_time_ms, client_ip, method)
     VALUES (%s, %s, %s, %s, %s)
@@ -662,7 +665,6 @@ def get_transactions(
     counterparty_inclusion_mode: bool = Query(True),
     categories: str = Query(None),
     category_inclusion_mode: bool = Query(True),
-    limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     session_key: str = Query(None)
 ):
@@ -764,8 +766,15 @@ def get_transactions(
             LIMIT %s OFFSET %s
         """
 
+    # Get the limit from settings
+    spendings_limit_query = """
+        SELECT transactions_load_limit FROM user_settings WHERE user_id = %s
+    """
+    spendings_limit_result = query_mysql(spendings_limit_query, (user_id,))
+    limit = spendings_limit_result[0][0] if spendings_limit_result else 25
+
     # Add limit and offset to parameters
-    params.extend([limit, offset])
+    params.extend([limit, offset * limit])
 
     # Fetch transaction IDs
     transaction_ids = query_mysql(transaction_query, params)
@@ -965,11 +974,19 @@ def get_filters(
 @app.get("/get_chart/balance_over_time")
 def get_chart_balance_over_time(
     session_key: str = Query(None),
-    initial_balance: int = Query(0)
 ):
     try:
         # Validate the session key
         user_id = validateSessionKey(session_key, False)
+
+        # Fetch initial_balance from user_settings table
+        initial_balance_query = """
+            SELECT chart_balance_initial_value FROM user_settings WHERE user_id = %s
+        """
+        initial_balance_result = query_mysql(initial_balance_query, (user_id,))
+
+        # Extract the initial balance
+        initial_balance = initial_balance_result[0][0] if initial_balance_result else 0
 
         # Query for the balance over time, but do not return the daily_balance
         balance_query = """
@@ -992,9 +1009,9 @@ def get_chart_balance_over_time(
                     t.date
             ) daily_balances
             JOIN 
-                (SELECT @running_balance := CAST(%s AS DECIMAL(10, 2))) r;  -- Using initial_balance here
+                (SELECT @running_balance := CAST(%s AS DECIMAL(10, 2))) r;
         """
-        balance_result = query_mysql(balance_query, (user_id, initial_balance))  # Pass initial_balance in the query
+        balance_result = query_mysql(balance_query, (user_id, initial_balance))
 
         # If there are results, fill in the gaps
         if balance_result:
@@ -1541,6 +1558,7 @@ def format_time_difference(delta):
 @app.post("/store_server_resource_logs")
 def store_server_resource_logs(data: dict):
     try:
+        # Insert the new log entry
         store_data_query = """
             INSERT INTO server_resource_logs (
                 cpu_temperature,
@@ -1561,8 +1579,9 @@ def store_server_resource_logs(data: dict):
             data["network_recv_bytes"],
         )
         query_mysql(store_data_query, store_data_params)
+
         return {"message": "Success"}
-    
+
     except Exception as e:
         print(e)
         return {"error": str(e)}
@@ -1792,6 +1811,23 @@ def get_fastapi_request_data(timeframe: str = Query(None)):
         print(e)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.post("/cleanup_logs")
+def clean_up_logs():
+
+    fastapi_cleaning_query = """
+        DELETE FROM server_fastapi_request_logs
+        WHERE timestamp < NOW() - INTERVAL 1 WEEK;
+    """
+    query_mysql(fastapi_cleaning_query)
+
+    server_resource_cleaning_query = """
+        DELETE FROM server_resource_logs
+        WHERE timestamp < NOW() - INTERVAL 1 WEEK;
+    """
+    query_mysql(server_resource_cleaning_query)
+
+    return {'message': 'Success!'}
 
 # - - - - - - - - - - - - - - - - - - - - - - - - - - #
 # - - - - - - - TV AND MOVIE WATCH LIST - - - - - - - #
