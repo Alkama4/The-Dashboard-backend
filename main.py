@@ -2819,7 +2819,19 @@ def get_title_cards(
             (SELECT COUNT(episode_id) FROM episodes WHERE title_id = t.title_id) AS episode_count,
             utd.favourite,
             GREATEST(COALESCE(utd.last_updated, '1970-01-01'), 
-                    COALESCE(MAX(ued.last_updated), '1970-01-01')) AS latest_updated
+                    COALESCE(MAX(ued.last_updated), '1970-01-01')) AS latest_updated,
+            (
+                SELECT 1
+                FROM episodes e
+                LEFT JOIN user_episode_details ued
+                    ON ued.episode_id = e.episode_id
+                    AND ued.user_id = utd.user_id
+                WHERE e.title_id = t.title_id
+                    AND e.air_date <= CURDATE()
+                    AND e.air_date >= DATE_SUB(CURDATE(), INTERVAL 14 DAY)
+                    AND COALESCE(ued.watch_count, 0) != 1
+                LIMIT 1
+            ) IS NOT NULL AS new_episodes
         FROM 
             user_title_details utd
         JOIN 
@@ -2936,6 +2948,7 @@ def get_title_cards(
             "episode_count": row[10],
             "is_favourite": row[11],
             "user_data_last_updated": row[12],
+            "new_episodes": row[13],
         }
 
         formatted_results.append(title_data)
@@ -3010,34 +3023,38 @@ def get_title_info(
             WHERE utd.user_id = %s AND utd.title_id = %s
             GROUP BY t.title_id, utd.watch_count, utd.notes, utd.last_updated;
         """
-        title_query_results = query_mysql(get_titles_query, (user_id, title_id))[0]
+        title_query_results_initial = query_mysql(get_titles_query, (user_id, title_id))
 
-        title_info = {
-            "title_id": title_query_results[0],
-            "tmdb_id": title_query_results[1],
-            "imdb_id": title_query_results[2],
-            "type": title_query_results[3],
-            "name": title_query_results[4],
-            "original_name": title_query_results[5],
-            "tagline": title_query_results[6],
-            "tmdb_vote_average": title_query_results[7],
-            "tmdb_vote_count": title_query_results[8],
-            "overview": title_query_results[9],
-            "poster_url": title_query_results[10],
-            "backdrop_url": title_query_results[11],
-            "movie_runtime": title_query_results[12],
-            "release_date": title_query_results[13],
-            "original_language": title_query_results[14],
-            "age_rating": title_query_results[15],
-            "trailer_key": title_query_results[16],
-            "title_info_last_updated": title_query_results[17],
-            "user_title_watch_count": title_query_results[18],
-            "user_title_notes": title_query_results[19],
-            "user_title_favourite": title_query_results[20],
-            "user_title_last_updated": title_query_results[21],
-            "title_genres": title_query_results[22].split(", ") if title_query_results[22] else [],
-            "backdrop_image_count": get_backdrop_count(title_query_results[0])
-        }
+        if title_query_results_initial:
+            title_query_results = title_query_results_initial[0]
+            title_info = {
+                "title_id": title_query_results[0],
+                "tmdb_id": title_query_results[1],
+                "imdb_id": title_query_results[2],
+                "type": title_query_results[3],
+                "name": title_query_results[4],
+                "original_name": title_query_results[5],
+                "tagline": title_query_results[6],
+                "tmdb_vote_average": title_query_results[7],
+                "tmdb_vote_count": title_query_results[8],
+                "overview": title_query_results[9],
+                "poster_url": title_query_results[10],
+                "backdrop_url": title_query_results[11],
+                "movie_runtime": title_query_results[12],
+                "release_date": title_query_results[13],
+                "original_language": title_query_results[14],
+                "age_rating": title_query_results[15],
+                "trailer_key": title_query_results[16],
+                "title_info_last_updated": title_query_results[17],
+                "user_title_watch_count": title_query_results[18],
+                "user_title_notes": title_query_results[19],
+                "user_title_favourite": title_query_results[20],
+                "user_title_last_updated": title_query_results[21],
+                "title_genres": title_query_results[22].split(", ") if title_query_results[22] else [],
+                "backdrop_image_count": get_backdrop_count(title_query_results[0])
+            }
+        else:
+            raise HTTPException(status_code=404, detail="The title doesn't exist.")
     else:
         # Base query for when title is NOT in user's watchlist
         get_titles_query_not_on_list = """
@@ -3067,34 +3084,38 @@ def get_title_info(
             WHERE t.title_id = %s
             GROUP BY t.title_id;
         """
-        title_query_results_not_on_list = query_mysql(get_titles_query_not_on_list, (title_id,))[0]
+        title_query_results_not_on_list_initial = query_mysql(get_titles_query_not_on_list, (title_id,))
 
-        title_info = {
-            "title_id": title_query_results_not_on_list[0],
-            "tmdb_id": title_query_results_not_on_list[1],
-            "imdb_id": title_query_results_not_on_list[2],
-            "type": title_query_results_not_on_list[3],
-            "name": title_query_results_not_on_list[4],
-            "original_name": title_query_results_not_on_list[5],
-            "tagline": title_query_results_not_on_list[6],
-            "tmdb_vote_average": title_query_results_not_on_list[7],
-            "tmdb_vote_count": title_query_results_not_on_list[8],
-            "overview": title_query_results_not_on_list[9],
-            "poster_url": title_query_results_not_on_list[10],
-            "backdrop_url": title_query_results_not_on_list[11],
-            "movie_runtime": title_query_results_not_on_list[12],
-            "release_date": title_query_results_not_on_list[13],
-            "original_language": title_query_results_not_on_list[14],
-            "age_rating": title_query_results_not_on_list[15],
-            "trailer_key": title_query_results_not_on_list[16],
-            "title_info_last_updated": title_query_results_not_on_list[18],
-            "user_title_watch_count": -1,
-            "user_title_notes": None,
-            "user_title_favourite": None,
-            "user_title_last_updated": None,
-            "title_genres": title_query_results_not_on_list[18].split(", ") if title_query_results_not_on_list[18] else [],
-            "backdrop_image_count": get_backdrop_count(title_query_results_not_on_list[0])
-        }
+        if title_query_results_not_on_list_initial:
+            title_query_results_not_on_list = title_query_results_not_on_list_initial[0]
+            title_info = {
+                "title_id": title_query_results_not_on_list[0],
+                "tmdb_id": title_query_results_not_on_list[1],
+                "imdb_id": title_query_results_not_on_list[2],
+                "type": title_query_results_not_on_list[3],
+                "name": title_query_results_not_on_list[4],
+                "original_name": title_query_results_not_on_list[5],
+                "tagline": title_query_results_not_on_list[6],
+                "tmdb_vote_average": title_query_results_not_on_list[7],
+                "tmdb_vote_count": title_query_results_not_on_list[8],
+                "overview": title_query_results_not_on_list[9],
+                "poster_url": title_query_results_not_on_list[10],
+                "backdrop_url": title_query_results_not_on_list[11],
+                "movie_runtime": title_query_results_not_on_list[12],
+                "release_date": title_query_results_not_on_list[13],
+                "original_language": title_query_results_not_on_list[14],
+                "age_rating": title_query_results_not_on_list[15],
+                "trailer_key": title_query_results_not_on_list[16],
+                "title_info_last_updated": title_query_results_not_on_list[18],
+                "user_title_watch_count": -1,
+                "user_title_notes": None,
+                "user_title_favourite": None,
+                "user_title_last_updated": None,
+                "title_genres": title_query_results_not_on_list[18].split(", ") if title_query_results_not_on_list[18] else [],
+                "backdrop_image_count": get_backdrop_count(title_query_results_not_on_list[0])
+            }
+        else:
+            raise HTTPException(status_code=404, detail="The title doesn't exist.")
 
     # Get the seasons and episodes if it's a TV show
     if title_info["type"] == "tv":
