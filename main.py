@@ -2793,6 +2793,7 @@ def get_title_cards(
     title_count: int = None,
     # Optional sorting
     sort_by: str = None,
+    direction: str = None,
     # Optional filters
     title_type: str = Query(None, regex="^(movie|tv)$"),  
     watched: bool = None,
@@ -2912,13 +2913,17 @@ def get_title_cards(
             utd.favourite
     """
 
+    # Use the direction if provided
+    direction = direction.upper() if direction else "DESC"
+
     # Add sorting if provided
     if sort_by == "release_date":
-        get_titles_query += " ORDER BY t.release_date DESC"
+        get_titles_query += f" ORDER BY t.release_date {direction}"
     elif sort_by == "last_watched":
-        get_titles_query += " ORDER BY latest_updated DESC"
+        get_titles_query += f" ORDER BY latest_updated {direction}"
     else:
-        get_titles_query += " ORDER BY t.vote_average DESC"
+        get_titles_query += f" ORDER BY t.vote_average {direction}"
+
 
     # Add the limit
     if title_count is None:
