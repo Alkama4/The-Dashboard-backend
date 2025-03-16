@@ -18,7 +18,6 @@ import pandas as pd
 import psutil
 import httpx
 from PIL import Image
-from starlette.responses import StreamingResponse
 
 # Fast api imports
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -112,6 +111,19 @@ def query_tmdb(endpoint: str, params: dict = {}):
     
     with httpx.Client() as client:
         response = client.get(f"https://api.themoviedb.org/3{endpoint}", params=params, headers=headers)
+        return response.json() if response.status_code == 200 else {}
+
+
+# Function to query for additional data like IMDB ratings from OMDB
+def query_omdb(imdb_id: str):
+    params = {}
+    params["apikey"] = os.getenv('OMDB_APIKEY', 'default_key')
+    params["i"] = imdb_id
+
+    print(f"Querying OMDB: {imdb_id}")
+    
+    with httpx.Client() as client:
+        response = client.get(f"https://www.omdbapi.com", params=params)
         return response.json() if response.status_code == 200 else {}
 
 
@@ -437,25 +449,27 @@ def delete_account(data: dict):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
+# Valid settings so that adding more is simpler
+VALID_SETTINGS = [
+    "transactions_load_limit",
+    "chart_balance_initial_value",
+    "list_all_titles_load_limit"
+]
+
 @app.get("/account/get_settings")
 def get_settings(session_key: str):
     
     # Validate the sessionkey and get the user_id
     user_id = validateSessionKey(session_key, False)
 
-    query = """
-        SELECT transactions_load_limit, chart_balance_initial_value
+    query = f"""
+        SELECT {', '.join(VALID_SETTINGS)}
         FROM user_settings
         WHERE user_id = %s;
     """
     result = query_mysql(query, (user_id,))[0]
 
-    print(result)
-
-    return {
-        "transactions_load_limit": result[0],
-        "chart_balance_initial_value": result[1],
-    }
+    return {setting: result[i] for i, setting in enumerate(VALID_SETTINGS)}
 
 
 @app.post("/account/update_settings")
@@ -478,7 +492,7 @@ def update_settings(data: dict):
         value = setting["value"]
         
         # Ensure that the setting name matches the columns in the database
-        if setting_name == "transactions_load_limit" or setting_name == "chart_balance_initial_value":
+        if setting_name in VALID_SETTINGS:
             set_clause.append(f"{setting_name} = %s")
             values.append(value)
 
@@ -1591,12 +1605,17 @@ def store_server_resource_logs(data: dict):
 def get_server_resource_logs(timeframe: str = Query(None)):
     try:
         # Build the WHERE clause based on the timeframe
-        if timeframe == "24h":
-            where_clause = "timestamp >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 24 HOUR)"
-        elif timeframe == "7d":
-            where_clause = "timestamp >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 7 DAY)"
-        elif timeframe == "30d":
-            where_clause = "timestamp >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 30 DAY)"
+        timeframe_switch = {
+            "24h": "24 HOUR",
+            "12h": "12 HOUR",
+            "6h": "6 HOUR",
+            "3h": "3 HOUR",
+            "1h": "1 HOUR",
+            "30m": "30 MINUTE",
+            "15m": "15 MINUTE"
+        }
+        if timeframe in timeframe_switch:
+            where_clause = f"timestamp >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL {timeframe_switch[timeframe]})"
         else:
             raise HTTPException(status_code=400, detail="Invalid timeframe")
 
@@ -1617,11 +1636,9 @@ def get_server_resource_logs(timeframe: str = Query(None)):
         # Execute the query and fetch the result
         server_data_result = query_mysql(server_data_query, ())
 
-        # Format the results and normalize timestamps to minute precision
+        # Format the results and normalize timestamps to 10-second precision
         formatted_data = []
         for result in server_data_result:
-            # Normalize timestamp to minute (ignoring seconds and milliseconds)
-            timestamp_minute = result[6].replace(second=0, microsecond=0)
             formatted_data.append({
                 "cpu_temperature": result[0],
                 "cpu_usage": result[1],
@@ -1629,7 +1646,8 @@ def get_server_resource_logs(timeframe: str = Query(None)):
                 "system_load": result[3],
                 "network_sent_bytes": result[4],
                 "network_recv_bytes": result[5],
-                "timestamp": timestamp_minute
+                # Normalize timestamp to the nearest 10 seconds downwards
+                "timestamp": result[6].replace(second=(result[6].second // 10) * 10, microsecond=0)
             })
         
         # Get the first and last timestamps from the result
@@ -1639,12 +1657,12 @@ def get_server_resource_logs(timeframe: str = Query(None)):
         else:
             return {"data": []}
 
-        # Generate the full range of minutes from start to end
+        # Generate the full range of timestamps in 10-second intervals from start to end
         current_time = start_time
         complete_data = []
         
         while current_time <= end_time:
-            # Check if we have a log entry for the current minute
+            # Check if we have a log entry for the current timestamp
             matching_data = next((data for data in formatted_data if data['timestamp'] == current_time), None)
             
             if matching_data:
@@ -1661,8 +1679,8 @@ def get_server_resource_logs(timeframe: str = Query(None)):
                     "timestamp": current_time
                 })
             
-            # Move to the next minute
-            current_time += timedelta(minutes=1)
+            # Move to the next 10-second interval
+            current_time += timedelta(seconds=10)
         
         return {"data": complete_data}
     
@@ -1728,7 +1746,7 @@ def get_fastapi_request_data(timeframe: str = Query(None)):
                 endpoint_error_codes[endpoint][status_code] += 1
 
         # Calculate backend time histogram
-        bucket_size = 50
+        bucket_size = 100
         max_bucket = 1000
         buckets = [(i * bucket_size, (i + 1) * bucket_size) for i in range(max_bucket // bucket_size)]
         buckets.append((max_bucket, 600000))
@@ -1742,7 +1760,7 @@ def get_fastapi_request_data(timeframe: str = Query(None)):
 
         histogram_data = [
             {
-                "time_range": f"{start}ms - {end}ms" if i < len(buckets) - 1 else f"{start}ms and up",
+                "time_range": f"{start}ms - {end - 1}ms" if i < len(buckets) - 1 else f"{start}ms and up",
                 "count": histogram[i]
             }
             for i, (start, end) in enumerate(buckets)
@@ -1817,13 +1835,13 @@ def clean_up_logs():
 
     fastapi_cleaning_query = """
         DELETE FROM server_fastapi_request_logs
-        WHERE timestamp < NOW() - INTERVAL 1 WEEK;
+        WHERE timestamp < NOW() - INTERVAL 1 DAY;
     """
     query_mysql(fastapi_cleaning_query)
 
     server_resource_cleaning_query = """
         DELETE FROM server_resource_logs
-        WHERE timestamp < NOW() - INTERVAL 1 WEEK;
+        WHERE timestamp < NOW() - INTERVAL 1 DAY;
     """
     query_mysql(server_resource_cleaning_query)
 
@@ -2085,6 +2103,28 @@ def add_or_update_genres_for_title(title_id, tmdb_genres):
         insert_genre_query = f"INSERT INTO title_genres (title_id, genre_id) VALUES {genre_values}"
         query_mysql(insert_genre_query)
 
+# Used for both tv and movies the same way so unify with a function
+def get_extra_info_from_omdb(imdb_id, title_id):
+    if imdb_id and title_id:
+        omdb_result = query_omdb(imdb_id)
+        print(omdb_result)
+
+        # Add awards, rotten tomatoes, director, writer
+        # Add awards, rotten tomatoes, director, writer
+
+        omdb_insert_query = """
+            UPDATE titles
+            SET imdb_vote_average = %s,
+                imdb_vote_count = %s
+            WHERE title_id = %s
+        """
+        omdb_insert_params = (
+            float(omdb_result.get("imdbRating")) if omdb_result.get("imdbRating") else None,
+            int(omdb_result.get("imdbVotes").replace(",", "")) if omdb_result.get("imdbVotes") else None,
+            title_id
+        )
+        query_mysql(omdb_insert_query, omdb_insert_params)
+
 # Functions for the actual adding/updating of a movie or a tv-show
 async def add_or_update_movie_title(title_tmdb_id):
     try:
@@ -2103,8 +2143,8 @@ async def add_or_update_movie_title(title_tmdb_id):
                 title_name, 
                 title_name_original, 
                 tagline, 
-                vote_average, 
-                vote_count, 
+                tmdb_vote_average, 
+                tmdb_vote_count, 
                 overview, 
                 poster_url, 
                 backdrop_url, 
@@ -2120,8 +2160,8 @@ async def add_or_update_movie_title(title_tmdb_id):
                 title_name = VALUES(title_name),
                 title_name_original = VALUES(title_name_original),
                 tagline = VALUES(tagline),
-                vote_average = VALUES(vote_average),
-                vote_count = VALUES(vote_count),
+                tmdb_vote_average = VALUES(tmdb_vote_average),
+                tmdb_vote_count = VALUES(tmdb_vote_count),
                 overview = VALUES(overview),
                 poster_url = VALUES(poster_url),
                 backdrop_url = VALUES(backdrop_url),
@@ -2163,8 +2203,8 @@ async def add_or_update_movie_title(title_tmdb_id):
             movie_title_info.get('title'),
             movie_title_info.get('original_title'),
             movie_title_info.get('tagline'),
-            movie_title_info.get('vote_average'),
-            movie_title_info.get('vote_count'),
+            movie_title_info.get('vote_average'),   # These are form tmdb so don't add tmdb_
+            movie_title_info.get('vote_count'),     # These are form tmdb so don't add tmdb_
             movie_title_info.get('overview'),
             movie_title_info.get('poster_path'),
             movie_title_info.get('backdrop_path'),
@@ -2186,11 +2226,14 @@ async def add_or_update_movie_title(title_tmdb_id):
             """
             title_id = query_mysql(title_id_query, (title_tmdb_id,))[0][0]
 
-        # Store the title related images
-        asyncio.create_task(store_title_images(movie_title_info.get('images'), title_id))
+        # OMDB query to get more info
+        get_extra_info_from_omdb(movie_title_info.get('imdb_id'), title_id)
 
         # Handle genres using the seperate function
         add_or_update_genres_for_title(title_id, movie_title_info.get('genres', []))
+
+        # Store the title related images
+        asyncio.create_task(store_title_images(movie_title_info.get('images'), title_id))
         
         return title_id
 
@@ -2215,8 +2258,8 @@ async def add_or_update_tv_title(title_tmdb_id):
                 title_name, 
                 title_name_original, 
                 tagline, 
-                vote_average, 
-                vote_count, 
+                tmdb_vote_average, 
+                tmdb_vote_count, 
                 overview, 
                 poster_url, 
                 backdrop_url, 
@@ -2232,8 +2275,8 @@ async def add_or_update_tv_title(title_tmdb_id):
                 title_name = VALUES(title_name),
                 title_name_original = VALUES(title_name_original),
                 tagline = VALUES(tagline),
-                vote_average = VALUES(vote_average),
-                vote_count = VALUES(vote_count),
+                tmdb_vote_average = VALUES(tmdb_vote_average),
+                tmdb_vote_count = VALUES(tmdb_vote_count),
                 overview = VALUES(overview),
                 poster_url = VALUES(poster_url),
                 backdrop_url = VALUES(backdrop_url),
@@ -2267,15 +2310,17 @@ async def add_or_update_tv_title(title_tmdb_id):
                 if video["official"] == True:
                     break
 
+        imdb_id = tv_title_info.get('external_ids', {}).get('imdb_id')
+        
         tv_title_params = (
             tv_title_info.get('id'),
-            tv_title_info.get('external_ids', {}).get('imdb_id'),
+            imdb_id,
             'tv',
             tv_title_info.get('name'),
             tv_title_info.get('original_name'),
             tv_title_info.get('tagline'),
-            tv_title_info.get('vote_average'),
-            tv_title_info.get('vote_count'),
+            tv_title_info.get('vote_average'),  # These are form tmdb so don't add tmdb_
+            tv_title_info.get('vote_count'),    # These are form tmdb so don't add tmdb_
             tv_title_info.get('overview'),
             tv_title_info.get('poster_path'),
             tv_title_info.get('backdrop_path'),
@@ -2288,8 +2333,6 @@ async def add_or_update_tv_title(title_tmdb_id):
         # Set id fetch to False since it often fails
         title_id = query_mysql(tv_title_query, tv_title_params, True)
 
-        print("PÄÄSTIIN TÄNNE SAAKKA!")
-
         # When updating the fetch_last_row_id returns a 0 sometimes for some reason so fetch the id seperately
         if title_id == 0:
             print("Need to fetch the title_id seperately")
@@ -2300,11 +2343,14 @@ async def add_or_update_tv_title(title_tmdb_id):
             """
             title_id = query_mysql(title_id_query, (title_tmdb_id,))[0][0]
 
-        # Setup the title images to download in the background
-        asyncio.create_task(store_title_images(tv_title_info.get('images'), title_id))
+        # OMDB query to get more info
+        get_extra_info_from_omdb(imdb_id, title_id)
 
         # Handle genres using the function
         add_or_update_genres_for_title(title_id, tv_title_info.get('genres', []))
+
+        # Setup the title images to download in the background
+        asyncio.create_task(store_title_images(tv_title_info.get('images'), title_id))
 
         # - - - SEASONS - - - 
         tv_seasons_params = []
@@ -2341,12 +2387,12 @@ async def add_or_update_tv_title(title_tmdb_id):
         if tv_seasons_params:
             placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s)"] * len(tv_seasons_params))
             query = f"""
-                INSERT INTO seasons (title_id, season_number, season_name, vote_average, vote_count, episode_count, overview, poster_url)
+                INSERT INTO seasons (title_id, season_number, season_name, tmdb_vote_average, tmdb_vote_count, episode_count, overview, poster_url)
                 VALUES {placeholders}
                 ON DUPLICATE KEY UPDATE
                     season_name = VALUES(season_name),
-                    vote_average = VALUES(vote_average),
-                    vote_count = VALUES(vote_count),
+                    tmdb_vote_average = VALUES(tmdb_vote_average),
+                    tmdb_vote_count = VALUES(tmdb_vote_count),
                     episode_count = VALUES(episode_count),
                     overview = VALUES(overview),
                     poster_url = VALUES(poster_url)
@@ -2398,13 +2444,13 @@ async def add_or_update_tv_title(title_tmdb_id):
         if tv_episodes_params:
             placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"] * len(tv_episodes_params))
             query = f"""
-                INSERT INTO episodes (season_id, title_id, episode_number, episode_name, vote_average,
-                                    vote_count, overview, still_url, air_date, runtime)
+                INSERT INTO episodes (season_id, title_id, episode_number, episode_name, tmdb_vote_average,
+                                    tmdb_vote_count, overview, still_url, air_date, runtime)
                 VALUES {placeholders}
                 ON DUPLICATE KEY UPDATE
                     episode_name = VALUES(episode_name),
-                    vote_average = VALUES(vote_average),
-                    vote_count = VALUES(vote_count),
+                    tmdb_vote_average = VALUES(tmdb_vote_average),
+                    tmdb_vote_count = VALUES(tmdb_vote_count),
                     overview = VALUES(overview),
                     still_url = VALUES(still_url),
                     air_date = VALUES(air_date),
@@ -2809,12 +2855,13 @@ def get_title_cards(
         SELECT 
             t.title_id, 
             t.title_name, 
-            t.vote_average, 
-            t.vote_count, 
+            t.tmdb_vote_average, 
+            t.tmdb_vote_count, 
             t.movie_runtime, 
             utd.watch_count, 
             t.type, 
             t.release_date,
+            t.poster_url,
             (SELECT COUNT(season_id) FROM seasons WHERE title_id = t.title_id) AS season_count,
             (SELECT COUNT(episode_id) FROM episodes WHERE title_id = t.title_id) AS episode_count,
             utd.favourite,
@@ -2902,13 +2949,13 @@ def get_title_cards(
         GROUP BY
             t.title_id, 
             t.title_name, 
-            t.vote_average, 
-            t.vote_count, 
-            t.poster_url, 
+            t.tmdb_vote_average, 
+            t.tmdb_vote_count, 
             t.movie_runtime, 
             utd.watch_count, 
             t.type, 
             t.release_date,
+            t.poster_url,
             utd.favourite
     """
 
@@ -2921,7 +2968,7 @@ def get_title_cards(
     elif sort_by == "last_watched":
         get_titles_query += f" ORDER BY latest_updated {direction}"
     else:
-        get_titles_query += f" ORDER BY t.vote_average {direction}"
+        get_titles_query += f" ORDER BY t.tmdb_vote_average {direction}"
 
 
     # Add the limit
@@ -2947,11 +2994,12 @@ def get_title_cards(
             "watch_count": row[5],
             "type": row[6],
             "release_date": row[7],
-            "season_count": row[8],
-            "episode_count": row[9],
-            "is_favourite": row[10],
+            "backup_poster_url": row[8],
+            "season_count": row[9],
+            "episode_count": row[10],
+            "is_favourite": row[11],
             # Don't give the latest_updated since not needed
-            "new_episodes": row[12],
+            "new_episodes": row[13],
         }
 
         formatted_results.append(title_data)
@@ -2962,8 +3010,7 @@ def get_title_cards(
 @app.get("/watch_list/list_titles")
 def list_titles(
     session_key: str = Query(...),
-    title_count: int = None,
-    offset: int = Query(default=None, gt=0),
+    offset: int = Query(default=None, gt=-1),
     # Optional sorting
     sort_by: str = None,
     direction: str = None,
@@ -2983,12 +3030,13 @@ def list_titles(
             t.title_id, 
             t.title_name, 
             t.title_name_original, 
-            t.vote_average, 
-            t.vote_count, 
+            t.tmdb_vote_average, 
+            t.tmdb_vote_count, 
             t.movie_runtime, 
             utd.watch_count, 
             t.type, 
             t.release_date,
+            t.poster_url,
             t.overview,
             (SELECT COUNT(season_id) FROM seasons WHERE title_id = t.title_id) AS season_count,
             (SELECT COUNT(episode_id) FROM episodes WHERE title_id = t.title_id) AS episode_count,
@@ -3006,8 +3054,7 @@ def list_titles(
                     AND e.air_date >= DATE_SUB(CURDATE(), INTERVAL 14 DAY)
                     AND COALESCE(ued.watch_count, 0) != 1
                 LIMIT 1
-            ) IS NOT NULL AS new_episodes,
-            GROUP_CONCAT(g.genre_name ORDER BY g.genre_name ASC) AS genres
+            ) IS NOT NULL AS new_episodes
         FROM 
             user_title_details utd
         JOIN 
@@ -3018,10 +3065,6 @@ def list_titles(
             episodes e ON e.season_id = s.season_id
         LEFT JOIN 
             user_episode_details ued ON ued.user_id = utd.user_id AND ued.episode_id = e.episode_id
-        LEFT JOIN 
-            title_genres tg ON tg.title_id = t.title_id
-        LEFT JOIN 
-            genres g ON g.genre_id = tg.genre_id
         WHERE 
             utd.user_id = %s
     """
@@ -3082,13 +3125,13 @@ def list_titles(
         GROUP BY
             t.title_id, 
             t.title_name, 
-            t.vote_average, 
-            t.vote_count, 
-            t.poster_url, 
+            t.tmdb_vote_average, 
+            t.tmdb_vote_count, 
             t.movie_runtime, 
             utd.watch_count, 
             t.type, 
             t.release_date,
+            t.poster_url,
             utd.favourite
     """
 
@@ -3101,31 +3144,58 @@ def list_titles(
     elif sort_by == "latest_updated":
         get_titles_query += f" ORDER BY latest_updated {direction}"
     else:
-        get_titles_query += f" ORDER BY t.vote_average {direction}"
+        get_titles_query += f" ORDER BY t.tmdb_vote_average {direction}"
 
     # Add the limit
-    # GET FROM SETTINGS ONEDAY
-    # if title_count is None:
-    #     title_count = 30
-    # get_titles_query += " LIMIT %s"
-    # query_params.append(title_count)
+    limit_query = "SELECT list_all_titles_load_limit FROM user_settings WHERE user_id = %s"
+    limit_result = query_mysql(limit_query, (user_id,))
+    title_limit = limit_result[0][0] if limit_result else 30  # Fallback to 30 if not found
+    query_limit = title_limit + 1   # By querying for one more we can check if there are more entries to load
+    get_titles_query += " LIMIT %s"
+    query_params.append(query_limit)
 
     # Add the offset
-    # if offset is None:
-    #     offset = 0
-    # calculated_offset = offset * title_count
-    # get_titles_query += " OFFSET %s"
-    # query_params.append(calculated_offset)
+    if offset is None:
+        offset = 0
+    calculated_offset = offset * title_limit
+    get_titles_query += " OFFSET %s"
+    query_params.append(calculated_offset)
 
-    # Execute query
+    # FITLER BY TAGS E.G. WWATCHED, NEW EPISODES, FAVOURITE
+    # FITLER BY TAGS E.G. WWATCHED, NEW EPISODES, FAVOURITE
+    # FITLER BY TAGS E.G. WWATCHED, NEW EPISODES, FAVOURITE
+
+    # The main query execution
     results = query_mysql(get_titles_query, tuple(query_params))
+    
+    # Check if there are more than the users limit to see if "has_more"
+    has_more = len(results) > title_limit
+    results = results[:title_limit] # Trim to the user set size
 
-    # Format results as objects with relevant fields
+    # Get the genres for each title with a single query
+    title_ids = [row[0] for row in results]
+    if title_ids:
+        genre_query = """
+            SELECT tg.title_id, g.genre_name
+            FROM title_genres tg
+            JOIN genres g ON tg.genre_id = g.genre_id
+            WHERE tg.title_id IN (%s)
+        """ % ','.join(['%s'] * len(title_ids))
+
+        genre_results = query_mysql(genre_query, tuple(title_ids))
+
+        title_genres_map = {}
+        for title_id, genre_name in genre_results:
+            if title_id not in title_genres_map:
+                title_genres_map[title_id] = []
+            title_genres_map[title_id].append(genre_name)
+
+    # Format the queried data
     formatted_results = []
     for row in results:
-        # Base title data to which the rest is added to
+        title_id = row[0]
         title_data = {
-            "id": row[0],
+            "id": title_id,
             "name": row[1],
             "name_original": row[2],
             "vote_average": row[3],
@@ -3134,18 +3204,22 @@ def list_titles(
             "watch_count": row[6],
             "type": row[7],
             "release_date": row[8],
-            "overview": row[9],
-            "season_count": row[10],
-            "episode_count": row[11],
-            "is_favourite": row[12],
-            # Don't give the latest_updated since not needed
-            "new_episodes": row[14],
-            "genres": row[15].split(",") if row[15] else [],
+            "backup_poster_url": row[9],
+            "overview": row[10],
+            "season_count": row[11],
+            "episode_count": row[12],
+            "is_favourite": row[13],
+            # Here's a blank that we don't need to return but is needed for something
+            "new_episodes": row[15],
+            "genres": title_genres_map.get(title_id, []),
         }
-
         formatted_results.append(title_data)
 
-    return {"titles": formatted_results}
+    return {
+        "titles": formatted_results, 
+        "has_more": has_more,
+        "offset": offset,
+    }
 
 
 def get_backdrop_count(title_id: int):
@@ -3192,8 +3266,10 @@ def get_title_info(
                 t.title_name, 
                 t.title_name_original, 
                 t.tagline, 
-                t.vote_average, 
-                t.vote_count, 
+                t.tmdb_vote_average, 
+                t.tmdb_vote_count, 
+                t.imdb_vote_average, 
+                t.imdb_vote_count, 
                 t.overview, 
                 t.poster_url, 
                 t.backdrop_url, 
@@ -3229,20 +3305,22 @@ def get_title_info(
                 "tagline": title_query_results[6],
                 "tmdb_vote_average": title_query_results[7],
                 "tmdb_vote_count": title_query_results[8],
-                "overview": title_query_results[9],
-                "poster_url": title_query_results[10],
-                "backdrop_url": title_query_results[11],
-                "movie_runtime": title_query_results[12],
-                "release_date": title_query_results[13],
-                "original_language": title_query_results[14],
-                "age_rating": title_query_results[15],
-                "trailer_key": title_query_results[16],
-                "title_info_last_updated": title_query_results[17],
-                "user_title_watch_count": title_query_results[18],
-                "user_title_notes": title_query_results[19],
-                "user_title_favourite": title_query_results[20],
-                "user_title_last_updated": title_query_results[21],
-                "title_genres": title_query_results[22].split(", ") if title_query_results[22] else [],
+                "imdb_vote_average": title_query_results[9],
+                "imdb_vote_count": title_query_results[10],
+                "overview": title_query_results[11],
+                "backup_poster_url": title_query_results[12],
+                "backup_backdrop_url": title_query_results[13],
+                "movie_runtime": title_query_results[14],
+                "release_date": title_query_results[15],
+                "original_language": title_query_results[16],
+                "age_rating": title_query_results[17],
+                "trailer_key": title_query_results[18],
+                "title_info_last_updated": title_query_results[19],
+                "user_title_watch_count": title_query_results[20],
+                "user_title_notes": title_query_results[21],
+                "user_title_favourite": title_query_results[22],
+                "user_title_last_updated": title_query_results[23],
+                "title_genres": title_query_results[24].split(", ") if title_query_results[24] else [],
                 "backdrop_image_count": get_backdrop_count(title_query_results[0])
             }
         else:
@@ -3258,8 +3336,10 @@ def get_title_info(
                 t.title_name, 
                 t.title_name_original, 
                 t.tagline, 
-                t.vote_average, 
-                t.vote_count, 
+                t.tmdb_vote_average, 
+                t.tmdb_vote_count, 
+                t.imdb_vote_average, 
+                t.imdb_vote_count, 
                 t.overview, 
                 t.poster_url, 
                 t.backdrop_url, 
@@ -3290,20 +3370,23 @@ def get_title_info(
                 "tagline": title_query_results_not_on_list[6],
                 "tmdb_vote_average": title_query_results_not_on_list[7],
                 "tmdb_vote_count": title_query_results_not_on_list[8],
-                "overview": title_query_results_not_on_list[9],
-                "poster_url": title_query_results_not_on_list[10],
-                "backdrop_url": title_query_results_not_on_list[11],
-                "movie_runtime": title_query_results_not_on_list[12],
-                "release_date": title_query_results_not_on_list[13],
-                "original_language": title_query_results_not_on_list[14],
-                "age_rating": title_query_results_not_on_list[15],
-                "trailer_key": title_query_results_not_on_list[16],
-                "title_info_last_updated": title_query_results_not_on_list[18],
+                "imdb_vote_average": title_query_results_not_on_list[9],
+                "imdb_vote_count": title_query_results_not_on_list[10],
+                "overview": title_query_results_not_on_list[11],
+                "backup_poster_url": title_query_results_not_on_list[12],
+                "backup_backdrop_url": title_query_results_not_on_list[13],
+                "movie_runtime": title_query_results_not_on_list[14],
+                "release_date": title_query_results_not_on_list[15],
+                "original_language": title_query_results_not_on_list[16],
+                "age_rating": title_query_results_not_on_list[17],
+                "trailer_key": title_query_results_not_on_list[18],
+                # Skip this one
+                "title_info_last_updated": title_query_results_not_on_list[20],
                 "user_title_watch_count": -1,
                 "user_title_notes": None,
                 "user_title_favourite": None,
                 "user_title_last_updated": None,
-                "title_genres": title_query_results_not_on_list[18].split(", ") if title_query_results_not_on_list[18] else [],
+                "title_genres": title_query_results_not_on_list[20].split(", ") if title_query_results_not_on_list[20] else [],
                 "backdrop_image_count": get_backdrop_count(title_query_results_not_on_list[0])
             }
         else:
@@ -3312,7 +3395,7 @@ def get_title_info(
     # Get the seasons and episodes if it's a TV show
     if title_info["type"] == "tv":
         get_seasons_query = """
-            SELECT season_id, season_number, season_name, vote_average, vote_count, episode_count, overview, poster_url
+            SELECT season_id, season_number, season_name, tmdb_vote_average, tmdb_vote_count, episode_count, overview, poster_url
             FROM seasons
             WHERE title_id = %s
             ORDER BY CASE WHEN season_number = 0 THEN 999 ELSE season_number END
@@ -3325,8 +3408,8 @@ def get_title_info(
                 e.episode_id, 
                 e.episode_number, 
                 e.episode_name, 
-                e.vote_average, 
-                e.vote_count, 
+                e.tmdb_vote_average, 
+                e.tmdb_vote_count, 
                 e.overview, 
                 e.still_url, 
                 e.air_date, 
@@ -3349,11 +3432,11 @@ def get_title_info(
                 "season_id": season_id,
                 "season_number": season[1],
                 "season_name": season[2],
-                "vote_average": season[3],
+                "tmdb_vote_average": season[3],
                 "vote_count": season[4],
                 "episode_count": season[5],
                 "overview": season[6],
-                "poster_url": season[7],
+                "backup_poster_url": season[7],
                 "episodes": []
             }
 
@@ -3364,10 +3447,10 @@ def get_title_info(
                     "episode_id": episode[1],
                     "episode_number": episode[2],
                     "episode_name": episode[3],
-                    "vote_average": episode[4],
+                    "tmdb_vote_average": episode[4],
                     "vote_count": episode[5],
                     "overview": episode[6],
-                    "still_url": episode[7],
+                    "backup_still_url": episode[7],
                     "air_date": episode[8],
                     "runtime": episode[9],
                     "watch_count": episode[10],

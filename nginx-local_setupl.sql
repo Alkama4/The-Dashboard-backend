@@ -20,7 +20,8 @@ DROP TABLE IF EXISTS user_settings;
 CREATE TABLE IF NOT EXISTS user_settings (
     user_id INT PRIMARY KEY,
     transactions_load_limit INT DEFAULT 25,
-    chart_balance_initial_value INT DEFAULT 0,
+    chart_balance_initial_value FLOAT DEFAULT 0,
+    list_all_titles_load_limit INT DEFAULT 25,
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
 
@@ -78,8 +79,10 @@ CREATE TABLE IF NOT EXISTS titles (
     title_name VARCHAR(255) NOT NULL,
     title_name_original VARCHAR(255),
     tagline VARCHAR(255),
-    vote_average DECIMAL(3,1),
-    vote_count INT,
+    tmdb_vote_average DECIMAL(3,1),
+    tmdb_vote_count INT,
+    imdb_vote_average DECIMAL(3,1),
+    imdb_vote_count INT,
     overview TEXT,
     poster_url VARCHAR(255),    -- Serve as a backup I guess for now
     backdrop_url VARCHAR(255),  -- Serve as a backup I guess for now
@@ -97,8 +100,8 @@ CREATE TABLE IF NOT EXISTS seasons (
     title_id INT NOT NULL,
     season_number INT NOT NULL,
     season_name VARCHAR(255),
-    vote_average DECIMAL(3,1),
-    vote_count INT,
+    tmdb_vote_average DECIMAL(3,1),
+    tmdb_vote_count INT,
     episode_count SMALLINT,
     overview TEXT,
     poster_url VARCHAR(255),    
@@ -115,8 +118,8 @@ CREATE TABLE IF NOT EXISTS episodes (
     title_id INT NOT NULL,  
     episode_number INT NOT NULL,
     episode_name VARCHAR(255),
-    vote_average DECIMAL(3,1),
-    vote_count INT,
+    tmdb_vote_average DECIMAL(3,1),
+    tmdb_vote_count INT,
     overview TEXT,
     still_url VARCHAR(255),
     air_date DATE DEFAULT NULL,
