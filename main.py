@@ -2811,7 +2811,6 @@ def get_title_cards(
             t.title_name, 
             t.vote_average, 
             t.vote_count, 
-            t.poster_url, 
             t.movie_runtime, 
             utd.watch_count, 
             t.type, 
@@ -2944,16 +2943,204 @@ def get_title_cards(
             "name": row[1],
             "vote_average": row[2],
             "vote_count": row[3],
-            "poster_url": row[4],
+            "movie_runtime": row[4],
+            "watch_count": row[5],
+            "type": row[6],
+            "release_date": row[7],
+            "season_count": row[8],
+            "episode_count": row[9],
+            "is_favourite": row[10],
+            # Don't give the latest_updated since not needed
+            "new_episodes": row[12],
+        }
+
+        formatted_results.append(title_data)
+
+    return {"titles": formatted_results}
+
+
+@app.get("/watch_list/list_titles")
+def list_titles(
+    session_key: str = Query(...),
+    title_count: int = None,
+    offset: int = Query(default=None, gt=0),
+    # Optional sorting
+    sort_by: str = None,
+    direction: str = None,
+    # Optional filters
+    title_type: str = Query(None, regex="^(movie|tv)$"),  
+    watched: bool = None,
+    favourite: bool = None,
+    released: bool = None,
+    started: bool = None,
+):
+    # Get user_id and validate session key
+    user_id = validateSessionKey(session_key, False)
+
+    # Base query
+    get_titles_query = """
+        SELECT 
+            t.title_id, 
+            t.title_name, 
+            t.title_name_original, 
+            t.vote_average, 
+            t.vote_count, 
+            t.movie_runtime, 
+            utd.watch_count, 
+            t.type, 
+            t.release_date,
+            t.overview,
+            (SELECT COUNT(season_id) FROM seasons WHERE title_id = t.title_id) AS season_count,
+            (SELECT COUNT(episode_id) FROM episodes WHERE title_id = t.title_id) AS episode_count,
+            utd.favourite,
+            GREATEST(COALESCE(utd.last_updated, '1970-01-01'), 
+                    COALESCE(MAX(ued.last_updated), '1970-01-01')) AS latest_updated,
+            (
+                SELECT 1
+                FROM episodes e
+                LEFT JOIN user_episode_details ued
+                    ON ued.episode_id = e.episode_id
+                    AND ued.user_id = utd.user_id
+                WHERE e.title_id = t.title_id
+                    AND e.air_date <= CURDATE()
+                    AND e.air_date >= DATE_SUB(CURDATE(), INTERVAL 14 DAY)
+                    AND COALESCE(ued.watch_count, 0) != 1
+                LIMIT 1
+            ) IS NOT NULL AS new_episodes,
+            GROUP_CONCAT(g.genre_name ORDER BY g.genre_name ASC) AS genres
+        FROM 
+            user_title_details utd
+        JOIN 
+            titles t ON utd.title_id = t.title_id
+        LEFT JOIN 
+            seasons s ON s.title_id = t.title_id
+        LEFT JOIN 
+            episodes e ON e.season_id = s.season_id
+        LEFT JOIN 
+            user_episode_details ued ON ued.user_id = utd.user_id AND ued.episode_id = e.episode_id
+        LEFT JOIN 
+            title_genres tg ON tg.title_id = t.title_id
+        LEFT JOIN 
+            genres g ON g.genre_id = tg.genre_id
+        WHERE 
+            utd.user_id = %s
+    """
+
+    query_params = [user_id]
+
+    # Filter by category if provided
+    if title_type:
+        get_titles_query += " AND t.type = %s"
+        query_params.append(title_type.lower())  # Ensure correct ENUM value
+
+    # Filter by watched status if provided
+    if watched is True:
+        get_titles_query += " AND utd.watch_count >= 1"
+    elif watched is False:
+        get_titles_query += " AND utd.watch_count <= 0"
+
+    # Filter by favourite status if provided
+    if favourite is True:
+        get_titles_query += " AND utd.favourite = TRUE"
+    elif favourite is False:
+        get_titles_query += " AND utd.favourite = FALSE"
+
+    # Filter by release date if provided
+    if released is True:
+        get_titles_query += " AND t.release_date <= CURDATE()"
+    elif released is False:
+        get_titles_query += " AND t.release_date > CURDATE()"
+
+    # Filter by whether the TV show has been started
+    if started is True:
+        get_titles_query += """
+            AND EXISTS (
+                SELECT 1 
+                FROM user_episode_details ued 
+                JOIN episodes e ON ued.episode_id = e.episode_id 
+                WHERE ued.user_id = utd.user_id 
+                AND e.title_id = t.title_id 
+                AND ued.watch_count > 0
+                LIMIT 1
+            )
+        """
+    elif started is False:
+        get_titles_query += """
+            AND NOT EXISTS (
+                SELECT 1 
+                FROM user_episode_details ued 
+                JOIN episodes e ON ued.episode_id = e.episode_id 
+                WHERE ued.user_id = utd.user_id 
+                AND e.title_id = t.title_id 
+                AND ued.watch_count > 0
+                LIMIT 1
+            )
+        """
+
+    # Grouping clause
+    get_titles_query += """
+        GROUP BY
+            t.title_id, 
+            t.title_name, 
+            t.vote_average, 
+            t.vote_count, 
+            t.poster_url, 
+            t.movie_runtime, 
+            utd.watch_count, 
+            t.type, 
+            t.release_date,
+            utd.favourite
+    """
+
+    # Use the direction when sorting if provided
+    direction = direction.upper() if direction else "DESC"
+
+    # Add sorting if provided
+    if sort_by == "release_date":
+        get_titles_query += f" ORDER BY t.release_date {direction}"
+    elif sort_by == "latest_updated":
+        get_titles_query += f" ORDER BY latest_updated {direction}"
+    else:
+        get_titles_query += f" ORDER BY t.vote_average {direction}"
+
+    # Add the limit
+    # GET FROM SETTINGS ONEDAY
+    # if title_count is None:
+    #     title_count = 30
+    # get_titles_query += " LIMIT %s"
+    # query_params.append(title_count)
+
+    # Add the offset
+    # if offset is None:
+    #     offset = 0
+    # calculated_offset = offset * title_count
+    # get_titles_query += " OFFSET %s"
+    # query_params.append(calculated_offset)
+
+    # Execute query
+    results = query_mysql(get_titles_query, tuple(query_params))
+
+    # Format results as objects with relevant fields
+    formatted_results = []
+    for row in results:
+        # Base title data to which the rest is added to
+        title_data = {
+            "id": row[0],
+            "name": row[1],
+            "name_original": row[2],
+            "vote_average": row[3],
+            "vote_count": row[4],
             "movie_runtime": row[5],
             "watch_count": row[6],
             "type": row[7],
             "release_date": row[8],
-            "season_count": row[9],
-            "episode_count": row[10],
-            "is_favourite": row[11],
-            "user_data_last_updated": row[12],
-            "new_episodes": row[13],
+            "overview": row[9],
+            "season_count": row[10],
+            "episode_count": row[11],
+            "is_favourite": row[12],
+            # Don't give the latest_updated since not needed
+            "new_episodes": row[14],
+            "genres": row[15].split(",") if row[15] else [],
         }
 
         formatted_results.append(title_data)
