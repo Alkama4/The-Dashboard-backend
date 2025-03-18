@@ -1,3 +1,4 @@
+-- This .sql file is a file that is kept up to date with the current databases setup. It can be used to set the DB up or to understand the structure. If you do ANY CHANGES to the database also add them here.
 
 --------------- USER MANAGEMENT ---------------
 DROP TABLE IF EXISTS users;

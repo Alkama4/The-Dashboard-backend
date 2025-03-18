@@ -128,10 +128,10 @@ def query_omdb(imdb_id: str):
 
 
 # Download an image from an url, semaphore to limit the amount of async tasks.
-async def download_image(image_url: str, image_save_path: str):
+async def download_image(image_url: str, image_save_path: str, replace = False):
     try:
-        # Skip download if file already exists
-        if os.path.exists(image_save_path):
+        # Skip download if file already exists and the replace flag isn't set to true
+        if os.path.exists(image_save_path) and not replace:
             print(f"Image already exists: {image_save_path}, skipping download.")
             return
 
@@ -1962,7 +1962,7 @@ def watch_list_search(
 
 
 # Used to get the images for a title and only the title. Seasons and episodes have a seperate one
-async def store_title_images(movie_images, title_id: str):
+async def store_title_images(movie_images, title_id: str, replace_images = False):
     try:
         base_path = f'/fastapi-images/{title_id}'
         Path(base_path).mkdir(parents=True, exist_ok=True)
@@ -1977,7 +1977,7 @@ async def store_title_images(movie_images, title_id: str):
                 file_extension = image['file_path'].split('.')[-1]
                 image_filename = f"logo.{file_extension}"
                 image_save_path = os.path.join(base_path, image_filename)
-                tasks.append(download_image(image_url, image_save_path))
+                tasks.append(download_image(image_url, image_save_path, replace_images))
 
         # Get the first poster
         if 'posters' in movie_images:
@@ -1990,7 +1990,7 @@ async def store_title_images(movie_images, title_id: str):
                 file_extension = first_english_poster['file_path'].split('.')[-1]
                 image_filename = f"poster.{file_extension}"
                 image_save_path = os.path.join(base_path, image_filename)
-                tasks.append(download_image(image_url, image_save_path))
+                tasks.append(download_image(image_url, image_save_path, replace_images))
 
         # Get the first 5 backdrops
         if 'backdrops' in movie_images:
@@ -2000,7 +2000,7 @@ async def store_title_images(movie_images, title_id: str):
                 file_extension = image['file_path'].split('.')[-1]
                 image_filename = f"backdrop{idx + 1}.{file_extension}"
                 image_save_path = os.path.join(base_path, image_filename)
-                tasks.append(download_image(image_url, image_save_path))
+                tasks.append(download_image(image_url, image_save_path, replace_images))
 
         # Run all the download tasks concurrently
         await asyncio.gather(*tasks)
@@ -2011,7 +2011,7 @@ async def store_title_images(movie_images, title_id: str):
         print(f"store_title_images error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-async def store_season_images(tv_seasons, title_id: str):
+async def store_season_images(tv_seasons, title_id: str, replace_images = False):
     try:
         tasks = []
 
@@ -2033,7 +2033,7 @@ async def store_season_images(tv_seasons, title_id: str):
             image_save_path = os.path.join(season_path, image_filename)
 
             # Add download task
-            tasks.append(download_image(image_url, image_save_path))
+            tasks.append(download_image(image_url, image_save_path, replace_images))
 
         # Run all the download tasks concurrently
         await asyncio.gather(*tasks)
@@ -2044,7 +2044,7 @@ async def store_season_images(tv_seasons, title_id: str):
         print(f"store_season_images error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-async def store_episode_images(tv_episodes, title_id: str):
+async def store_episode_images(tv_episodes, title_id: str, replace_images = False):
     try:
         tasks = []
 
@@ -2067,7 +2067,7 @@ async def store_episode_images(tv_episodes, title_id: str):
             image_save_path = os.path.join(episode_path, image_filename)
 
             # Add download task
-            tasks.append(download_image(image_url, image_save_path))
+            tasks.append(download_image(image_url, image_save_path, replace_images))
 
         # Run all the download tasks concurrently
         await asyncio.gather(*tasks)
@@ -2078,7 +2078,7 @@ async def store_episode_images(tv_episodes, title_id: str):
         print(f"store_episode_images error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-# Used for the tvs and movies to add the genres to avoid duplication
+# Used for the tvs and movies to add the genres to a title avoid duplication
 def add_or_update_genres_for_title(title_id, tmdb_genres):
     if not tmdb_genres:
         return  # No genres to process
@@ -2103,7 +2103,7 @@ def add_or_update_genres_for_title(title_id, tmdb_genres):
         insert_genre_query = f"INSERT INTO title_genres (title_id, genre_id) VALUES {genre_values}"
         query_mysql(insert_genre_query)
 
-# Used for both tv and movies the same way so unify with a function
+# Used for both tv and movies the same way to unify with a function
 def get_extra_info_from_omdb(imdb_id, title_id):
     if imdb_id and title_id:
         omdb_result = query_omdb(imdb_id)
@@ -2126,99 +2126,126 @@ def get_extra_info_from_omdb(imdb_id, title_id):
         query_mysql(omdb_insert_query, omdb_insert_params)
 
 # Functions for the actual adding/updating of a movie or a tv-show
-async def add_or_update_movie_title(title_tmdb_id):
+async def add_or_update_movie_title(
+    title_tmdb_id: int, 
+    update_title_info=True, 
+    update_title_images=False
+):
     try:
-        # Get the data from TMDB
-        movie_title_info = query_tmdb(f"/movie/{title_tmdb_id}", {
-            "append_to_response": "images,releases,videos",
-            "include_image_language": "en,null",
-        })
+        if update_title_info:
+            # Get the data from TMDB
+            movie_title_info = query_tmdb(f"/movie/{title_tmdb_id}", {
+                "append_to_response": "images,releases,videos",
+                "include_image_language": "en,null",
+            })
 
-        # Insert the movie into titles
-        query = """
-            INSERT INTO titles (
-                tmdb_id, 
-                imdb_id, 
-                type, 
-                title_name, 
-                title_name_original, 
-                tagline, 
-                tmdb_vote_average, 
-                tmdb_vote_count, 
-                overview, 
-                poster_url, 
-                backdrop_url, 
-                movie_runtime, 
-                release_date,
-                original_language,
-                age_rating,
-                trailer_key
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE 
-                imdb_id = VALUES(imdb_id),
-                title_name = VALUES(title_name),
-                title_name_original = VALUES(title_name_original),
-                tagline = VALUES(tagline),
-                tmdb_vote_average = VALUES(tmdb_vote_average),
-                tmdb_vote_count = VALUES(tmdb_vote_count),
-                overview = VALUES(overview),
-                poster_url = VALUES(poster_url),
-                backdrop_url = VALUES(backdrop_url),
-                release_date = VALUES(release_date),
-                original_language = VALUES(original_language),
-                age_rating = VALUES(age_rating),
-                trailer_key = VALUES(trailer_key);
-        """
+            # Insert the movie into titles
+            query = """
+                INSERT INTO titles (
+                    tmdb_id, 
+                    imdb_id, 
+                    type, 
+                    title_name, 
+                    title_name_original, 
+                    tagline, 
+                    tmdb_vote_average, 
+                    tmdb_vote_count, 
+                    overview, 
+                    poster_url, 
+                    backdrop_url, 
+                    movie_runtime, 
+                    release_date,
+                    original_language,
+                    age_rating,
+                    trailer_key
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE 
+                    imdb_id = VALUES(imdb_id),
+                    title_name = VALUES(title_name),
+                    title_name_original = VALUES(title_name_original),
+                    tagline = VALUES(tagline),
+                    tmdb_vote_average = VALUES(tmdb_vote_average),
+                    tmdb_vote_count = VALUES(tmdb_vote_count),
+                    overview = VALUES(overview),
+                    poster_url = VALUES(poster_url),
+                    backdrop_url = VALUES(backdrop_url),
+                    release_date = VALUES(release_date),
+                    original_language = VALUES(original_language),
+                    age_rating = VALUES(age_rating),
+                    trailer_key = VALUES(trailer_key);
+            """
 
-        # Retrieve the age rating
-        movie_title_age_rating = None
-        us_movie_title_age_rating = None
-        for release in movie_title_info['releases']['countries']:
-            if release['iso_3166_1'] == 'FI':
-                movie_title_age_rating = release['certification']
-                break
-            elif release['iso_3166_1'] == 'US' and release['certification'] != '':
-                us_movie_title_age_rating = release['certification']
-
-        if movie_title_age_rating == None:
-            if us_movie_title_age_rating:
-                movie_title_age_rating = us_movie_title_age_rating
-            else:
-                movie_title_age_rating = None
-
-        # Retrieve the youtube trailer key
-        movie_title_trailer_key = None
-        for video in movie_title_info["videos"]["results"]:
-            if video["site"] == "YouTube" and video["type"] == "Trailer":
-                movie_title_trailer_key = video["key"]
-                if video["official"] == True:
+            # Retrieve the age rating
+            movie_title_age_rating = None
+            us_movie_title_age_rating = None
+            for release in movie_title_info['releases']['countries']:
+                if release['iso_3166_1'] == 'FI':
+                    movie_title_age_rating = release['certification']
                     break
+                elif release['iso_3166_1'] == 'US' and release['certification'] != '':
+                    us_movie_title_age_rating = release['certification']
 
-        # Generate params
-        params = (
-            movie_title_info.get('id'),
-            movie_title_info.get('imdb_id'),
-            'movie',
-            movie_title_info.get('title'),
-            movie_title_info.get('original_title'),
-            movie_title_info.get('tagline'),
-            movie_title_info.get('vote_average'),   # These are form tmdb so don't add tmdb_
-            movie_title_info.get('vote_count'),     # These are form tmdb so don't add tmdb_
-            movie_title_info.get('overview'),
-            movie_title_info.get('poster_path'),
-            movie_title_info.get('backdrop_path'),
-            movie_title_info.get('runtime'),
-            movie_title_info.get('release_date'),
-            movie_title_info.get('original_language'),
-            movie_title_age_rating,
-            movie_title_trailer_key
-        )
-        title_id = query_mysql(query, params, fetch_last_row_id=True)
+            if movie_title_age_rating == None:
+                if us_movie_title_age_rating:
+                    movie_title_age_rating = us_movie_title_age_rating
+                else:
+                    movie_title_age_rating = None
 
-        # When updating the fetch_last_row_id returns a 0 for some reason so fetch the id seperately
-        if title_id == 0:
-            print("Need to fetch the title_id seperately")
+            # Retrieve the youtube trailer key
+            movie_title_trailer_key = None
+            for video in movie_title_info["videos"]["results"]:
+                if video["site"] == "YouTube" and video["type"] == "Trailer":
+                    movie_title_trailer_key = video["key"]
+                    if video["official"] == True:
+                        break
+
+            # Generate params
+            params = (
+                movie_title_info.get('id'),
+                movie_title_info.get('imdb_id'),
+                'movie',
+                movie_title_info.get('title'),
+                movie_title_info.get('original_title'),
+                movie_title_info.get('tagline'),
+                movie_title_info.get('vote_average'),   # These are from tmdb so don't add tmdb_
+                movie_title_info.get('vote_count'),     # These are from tmdb so don't add tmdb_
+                movie_title_info.get('overview'),
+                movie_title_info.get('poster_path'),
+                movie_title_info.get('backdrop_path'),
+                movie_title_info.get('runtime'),
+                movie_title_info.get('release_date'),
+                movie_title_info.get('original_language'),
+                movie_title_age_rating,
+                movie_title_trailer_key
+            )
+            title_id = query_mysql(query, params, fetch_last_row_id=True)
+
+            # When updating the fetch_last_row_id returns a 0 for some reason so fetch the id seperately
+            if title_id == 0:
+                print("Need to fetch the title_id seperately")
+                title_id_query = """
+                    SELECT title_id
+                    FROM titles
+                    WHERE tmdb_id = %s
+                """
+                title_id = query_mysql(title_id_query, (title_tmdb_id,))[0][0]
+
+            # Handle genres using the seperate function
+            add_or_update_genres_for_title(title_id, movie_title_info.get('genres', []))
+
+            # OMDB query to get more info
+            get_extra_info_from_omdb(movie_title_info.get('imdb_id'), title_id)
+
+            # Set images for image fetching
+            title_images_data = movie_title_info.get('images')
+        
+        elif update_title_images:
+            # Query just for the images if we aren't updating info and just updating images
+            title_images_data = query_tmdb(f"/movie/{title_tmdb_id}/images", {
+                "include_image_language": "en,null",
+            })
+            # Get the title_id from tmdb id
             title_id_query = """
                 SELECT title_id
                 FROM titles
@@ -2226,116 +2253,233 @@ async def add_or_update_movie_title(title_tmdb_id):
             """
             title_id = query_mysql(title_id_query, (title_tmdb_id,))[0][0]
 
-        # OMDB query to get more info
-        get_extra_info_from_omdb(movie_title_info.get('imdb_id'), title_id)
-
-        # Handle genres using the seperate function
-        add_or_update_genres_for_title(title_id, movie_title_info.get('genres', []))
-
         # Store the title related images
-        asyncio.create_task(store_title_images(movie_title_info.get('images'), title_id))
+        # Handle the replacement check for each image. If we were to check also here it wouldn't automatically update missing images.
+        asyncio.create_task(store_title_images(title_images_data, title_id, update_title_images))
         
         return title_id
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-async def add_or_update_tv_title(title_tmdb_id):
+async def add_or_update_tv_title(
+    title_tmdb_id,
+    update_title_info=True, 
+    update_title_images=False, 
+    update_season_number=0,  # If 0 update all, or if > 0 uses the season number
+    update_season_info=False, 
+    update_season_images=False
+):
     try:
-        # Get the data from tmdb
-        tv_title_info = query_tmdb(f"/tv/{title_tmdb_id}", {
-            "append_to_response": "external_ids,images,content_ratings,videos", 
-            "include_image_language": "en,null"
-        })
+        # Check if we are updating any of the actual title's data or just episodes (seasons)
+        if update_title_info or update_title_images:
+            if update_title_info:
+                # Get the data from tmdb
+                tv_title_info = query_tmdb(f"/tv/{title_tmdb_id}", {
+                    "append_to_response": "external_ids,images,content_ratings,videos", 
+                    "include_image_language": "en,null"
+                })
 
-        # - - - TITLE - - - 
-        # Insert the tv-series info into titles
-        tv_title_query = """
-            INSERT INTO titles (
-                tmdb_id, 
-                imdb_id, 
-                type, 
-                title_name, 
-                title_name_original, 
-                tagline, 
-                tmdb_vote_average, 
-                tmdb_vote_count, 
-                overview, 
-                poster_url, 
-                backdrop_url, 
-                movie_runtime, 
-                release_date,
-                original_language,
-                age_rating,
-                trailer_key
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE 
-                imdb_id = VALUES(imdb_id),
-                title_name = VALUES(title_name),
-                title_name_original = VALUES(title_name_original),
-                tagline = VALUES(tagline),
-                tmdb_vote_average = VALUES(tmdb_vote_average),
-                tmdb_vote_count = VALUES(tmdb_vote_count),
-                overview = VALUES(overview),
-                poster_url = VALUES(poster_url),
-                backdrop_url = VALUES(backdrop_url),
-                release_date = VALUES(release_date),
-                original_language = VALUES(original_language),
-                age_rating = VALUES(age_rating),
-                trailer_key = VALUES(trailer_key);
-        """
+                # - - - TITLE - - - 
+                # Insert the tv-series info into titles
+                tv_title_query = """
+                    INSERT INTO titles (
+                        tmdb_id, 
+                        imdb_id, 
+                        type, 
+                        title_name, 
+                        title_name_original, 
+                        tagline, 
+                        tmdb_vote_average, 
+                        tmdb_vote_count, 
+                        overview, 
+                        poster_url, 
+                        backdrop_url, 
+                        movie_runtime, 
+                        release_date,
+                        original_language,
+                        age_rating,
+                        trailer_key
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE 
+                        imdb_id = VALUES(imdb_id),
+                        title_name = VALUES(title_name),
+                        title_name_original = VALUES(title_name_original),
+                        tagline = VALUES(tagline),
+                        tmdb_vote_average = VALUES(tmdb_vote_average),
+                        tmdb_vote_count = VALUES(tmdb_vote_count),
+                        overview = VALUES(overview),
+                        poster_url = VALUES(poster_url),
+                        backdrop_url = VALUES(backdrop_url),
+                        release_date = VALUES(release_date),
+                        original_language = VALUES(original_language),
+                        age_rating = VALUES(age_rating),
+                        trailer_key = VALUES(trailer_key);
+                """
 
-        # Retrieve the age rating
-        tv_title_age_rating = None
-        us_tv_title_age_rating = None
-        for release in tv_title_info['content_ratings']['results']:
-            if release['iso_3166_1'] == 'FI':
-                tv_title_age_rating = release['rating']
-                break
-            elif release['iso_3166_1'] == 'US' and release['rating'] != '':
-                us_tv_title_age_rating = release['rating']
+                # Retrieve the age rating
+                tv_title_age_rating = None
+                us_tv_title_age_rating = None
+                for release in tv_title_info['content_ratings']['results']:
+                    if release['iso_3166_1'] == 'FI':
+                        tv_title_age_rating = release['rating']
+                        break
+                    elif release['iso_3166_1'] == 'US' and release['rating'] != '':
+                        us_tv_title_age_rating = release['rating']
 
-        if tv_title_age_rating == None:
-            if us_tv_title_age_rating:
-                tv_title_age_rating = us_tv_title_age_rating
-            else:
-                tv_title_age_rating = ""
+                if tv_title_age_rating == None:
+                    if us_tv_title_age_rating:
+                        tv_title_age_rating = us_tv_title_age_rating
+                    else:
+                        tv_title_age_rating = ""
 
-        # Retrieve the youtube trailer key
-        tv_title_trailer_key = None
-        for video in tv_title_info["videos"]["results"]:
-            if video["site"] == "YouTube" and video["type"] == "Trailer":
-                tv_title_trailer_key = video["key"]
-                if video["official"] == True:
-                    break
+                # Retrieve the youtube trailer key
+                tv_title_trailer_key = None
+                for video in tv_title_info["videos"]["results"]:
+                    if video["site"] == "YouTube" and video["type"] == "Trailer":
+                        tv_title_trailer_key = video["key"]
+                        if video["official"] == True:
+                            break
 
-        imdb_id = tv_title_info.get('external_ids', {}).get('imdb_id')
+                imdb_id = tv_title_info.get('external_ids', {}).get('imdb_id')
+                
+                tv_title_params = (
+                    tv_title_info.get('id'),
+                    imdb_id,
+                    'tv',
+                    tv_title_info.get('name'),
+                    tv_title_info.get('original_name'),
+                    tv_title_info.get('tagline'),
+                    tv_title_info.get('vote_average'),  # These are from tmdb so don't add tmdb_
+                    tv_title_info.get('vote_count'),    # These are from tmdb so don't add tmdb_
+                    tv_title_info.get('overview'),
+                    tv_title_info.get('poster_path'),
+                    tv_title_info.get('backdrop_path'),
+                    None,   # there's no runtime since its tv
+                    tv_title_info.get('first_air_date'),
+                    tv_title_info.get('original_language'),
+                    tv_title_age_rating,
+                    tv_title_trailer_key
+                )
+                # Set id fetch to False since it often fails
+                title_id = query_mysql(tv_title_query, tv_title_params, True)
+
+                # When updating the fetch_last_row_id returns a 0 sometimes for some reason so fetch the id seperately
+                if title_id == 0:
+                    print("Need to fetch the title_id seperately")
+                    title_id_query = """
+                        SELECT title_id
+                        FROM titles
+                        WHERE tmdb_id = %s
+                    """
+                    title_id = query_mysql(title_id_query, (title_tmdb_id,))[0][0]
+
+                # Handle genres using the function
+                add_or_update_genres_for_title(title_id, tv_title_info.get('genres', []))
+
+                # OMDB query to get more info
+                get_extra_info_from_omdb(imdb_id, title_id)
+
+
+                # - - - SEASONS - - - 
+                # The Season data comes automatically from the tv-shows title query so these are handled with the update_title_data
+                tv_seasons_params = []
+                season_images_data = {
+                    "title_id": title_id,
+                    "seasons": []
+                }
+
+                for season in tv_title_info.get('seasons', []):
+                    if season.get('season_number') == 0:  # Skip season 0 (specials)
+                        continue
+                    
+                    # Add season data for MySQL insert
+                    tv_seasons_params.append((
+                        title_id,
+                        season.get('season_number'),
+                        season.get('name'),
+                        season.get('vote_average'),
+                        None,  # TMDB does not provide vote_count for seasons
+                        season.get('episode_count'),
+                        season.get('overview'),
+                        season.get('poster_path'),
+                    ))
+
+                    # Add season poster data for image storage
+                    if season.get("poster_path"):  # Only add if poster exists
+                        season_images_data = [
+                            {"season_number": season["season_number"], "poster_path": season["poster_path"]}
+                            for season in tv_title_info.get("seasons", [])
+                            if season.get("poster_path")  # Only include valid posters
+                        ]
+
+                # Insert into the database if there are valid seasons
+                if tv_seasons_params:
+                    placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s)"] * len(tv_seasons_params))
+                    query = f"""
+                        INSERT INTO seasons (title_id, season_number, season_name, tmdb_vote_average, tmdb_vote_count, episode_count, overview, poster_url)
+                        VALUES {placeholders}
+                        ON DUPLICATE KEY UPDATE
+                            season_name = VALUES(season_name),
+                            tmdb_vote_average = VALUES(tmdb_vote_average),
+                            tmdb_vote_count = VALUES(tmdb_vote_count),
+                            episode_count = VALUES(episode_count),
+                            overview = VALUES(overview),
+                            poster_url = VALUES(poster_url)
+                    """
+                    flat_values = [item for sublist in tv_seasons_params for item in sublist]
+                    query_mysql(query, flat_values)
+                            
+                # Set the images for 
+                title_images_data = tv_title_info.get('images')
+
+
+            # If we aren't updating info and just updating images
+            elif update_title_images:
+
+                # Get the title_id with the tmdb_id from mysql
+                title_id_query = """
+                    SELECT title_id
+                    FROM titles
+                    WHERE tmdb_id = %s
+                """
+                title_id = query_mysql(title_id_query, (title_tmdb_id,))[0][0]
+
+                # query just for the images and and general data for seasons images 
+                cut_down_tv_title_info = query_tmdb(f"/tv/{title_tmdb_id}", {
+                    "append_to_response": "images", 
+                    "include_image_language": "en,null"
+                })
+
+                # Title images data
+                title_images_data = cut_down_tv_title_info.get('images')
+
+                # Season images data
+                season_images_data = {
+                    "title_id": title_id,
+                    "seasons": []
+                }
+                for season in cut_down_tv_title_info.get('seasons', []):
+                    if season.get('season_number') == 0:  # Skip season 0 (specials)
+                        continue
+                    elif season.get("poster_path"):  # Only add if poster exists
+                        season_images_data = [
+                            {"season_number": season["season_number"], "poster_path": season["poster_path"]}
+                            for season in cut_down_tv_title_info.get("seasons", [])
+                            if season.get("poster_path")  # Only include valid posters
+                        ]
+
+            # Do not check for the update_title_images since it's handled in the download image function.
+            # Instead just run them when ever anything is updated in the titles data with the parameter given to it.
+
+            # Setup the title images to download in the background
+            asyncio.create_task(store_title_images(title_images_data, title_id, update_title_images))
+            # Setup the season images to download in the background
+            asyncio.create_task(store_season_images(season_images_data, title_id, update_title_images))
         
-        tv_title_params = (
-            tv_title_info.get('id'),
-            imdb_id,
-            'tv',
-            tv_title_info.get('name'),
-            tv_title_info.get('original_name'),
-            tv_title_info.get('tagline'),
-            tv_title_info.get('vote_average'),  # These are form tmdb so don't add tmdb_
-            tv_title_info.get('vote_count'),    # These are form tmdb so don't add tmdb_
-            tv_title_info.get('overview'),
-            tv_title_info.get('poster_path'),
-            tv_title_info.get('backdrop_path'),
-            None,   # there's no runtime since its tv
-            tv_title_info.get('first_air_date'),
-            tv_title_info.get('original_language'),
-            tv_title_age_rating,
-            tv_title_trailer_key
-        )
-        # Set id fetch to False since it often fails
-        title_id = query_mysql(tv_title_query, tv_title_params, True)
-
-        # When updating the fetch_last_row_id returns a 0 sometimes for some reason so fetch the id seperately
-        if title_id == 0:
-            print("Need to fetch the title_id seperately")
+        # Else if we didn't run any of the title related code get the title_id for episodes here
+        elif update_season_info or update_season_images:
             title_id_query = """
                 SELECT title_id
                 FROM titles
@@ -2343,124 +2487,91 @@ async def add_or_update_tv_title(title_tmdb_id):
             """
             title_id = query_mysql(title_id_query, (title_tmdb_id,))[0][0]
 
-        # OMDB query to get more info
-        get_extra_info_from_omdb(imdb_id, title_id)
-
-        # Handle genres using the function
-        add_or_update_genres_for_title(title_id, tv_title_info.get('genres', []))
-
-        # Setup the title images to download in the background
-        asyncio.create_task(store_title_images(tv_title_info.get('images'), title_id))
-
-        # - - - SEASONS - - - 
-        tv_seasons_params = []
-        season_images_data = {
-            "title_id": title_id,
-            "seasons": []
-        }
-
-        for season in tv_title_info.get('seasons', []):
-            if season.get('season_number') == 0:  # Skip season 0 (specials)
-                continue
-            
-            # Add season data for MySQL insert
-            tv_seasons_params.append((
-                title_id,
-                season.get('season_number'),
-                season.get('name'),
-                season.get('vote_average'),
-                None,  # TMDB does not provide vote_count for seasons
-                season.get('episode_count'),
-                season.get('overview'),
-                season.get('poster_path'),
-            ))
-
-            # Add season poster data for image storage
-            if season.get("poster_path"):  # Only add if poster exists
-                season_images_data = [
-                    {"season_number": season["season_number"], "poster_path": season["poster_path"]}
-                    for season in tv_title_info.get("seasons", [])
-                    if season.get("poster_path")  # Only include valid posters
-                ]
-
-        # Insert into the database if there are valid seasons
-        if tv_seasons_params:
-            placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s)"] * len(tv_seasons_params))
-            query = f"""
-                INSERT INTO seasons (title_id, season_number, season_name, tmdb_vote_average, tmdb_vote_count, episode_count, overview, poster_url)
-                VALUES {placeholders}
-                ON DUPLICATE KEY UPDATE
-                    season_name = VALUES(season_name),
-                    tmdb_vote_average = VALUES(tmdb_vote_average),
-                    tmdb_vote_count = VALUES(tmdb_vote_count),
-                    episode_count = VALUES(episode_count),
-                    overview = VALUES(overview),
-                    poster_url = VALUES(poster_url)
+            # Get the seasons from mysql since we are updating a specific thing that we already have instead of the whole thing for TMDB
+            seasons_query = """
+                SELECT s.season_number
+                FROM seasons s
+                JOIN titles t
+                ON s.title_id = t.title_id
+                WHERE t.title_id = %s
             """
-            flat_values = [item for sublist in tv_seasons_params for item in sublist]
-            query_mysql(query, flat_values)
+            seasons_result = query_mysql(seasons_query, (title_id,))
 
-        # Setup the season images to download in the background
-        asyncio.create_task(store_season_images(season_images_data, title_id))
+            # Generate a fake tv_title_info from it so that the episodes works with it
+            # Create a list of dictionaries with season_number by accessing the tuple element
+            tv_title_info = {
+                "seasons": [{"season_number": season[0]} for season in seasons_result]
+            }
+        
+        # Else just return since we aren't modifying anything
+        else:
+            raise HTTPException(status_code=400, detail=f"The function is set to do nothing since all the options are disabled.")
 
         # - - - EPISODES - - - 
-        # Fetch season IDs from the database
-        season_id_query = "SELECT season_id, season_number FROM seasons WHERE title_id = %s"
-        season_id_map = {row[1]: row[0] for row in query_mysql(season_id_query, (title_id,))}
+        # This is where we have the seperation between the "title" and "seasons". It's confusing since the seasons data comes form the
+        # title's query and the episodes from the seasons query.
 
-        # Prepare list of tuples for bulk insertion
-        tv_episodes_params = []
-        episode_images_data = []
+        # Do not run any of the episode stuff if we aren't updating any of it.
+        if update_season_info or update_season_images:
+            # Fetch season IDs from the database
+            season_id_query = "SELECT season_id, season_number FROM seasons WHERE title_id = %s"
+            season_id_map = {row[1]: row[0] for row in query_mysql(season_id_query, (title_id,))}
 
-        for season in tv_title_info.get("seasons", []):
-            season_number = season.get("season_number")
-            season_id = season_id_map.get(season_number)  # Get correct season_id
+            # Prepare list of tuples for bulk insertion
+            tv_episodes_params = []
+            episode_images_data = []
 
-            if season_id:
-                season_info = query_tmdb(f"/tv/{title_tmdb_id}/season/{season_number}", {})
+            for season in tv_title_info.get("seasons", []):
+                season_number = season.get("season_number")
+                season_id = season_id_map.get(season_number)
 
-                for episode in season_info.get("episodes", []):
-                    tv_episodes_params.append((
-                        season_id,
-                        title_id,
-                        episode.get("episode_number"),
-                        episode.get("name"),
-                        episode.get("vote_average"),
-                        episode.get("vote_count"),
-                        episode.get("overview"),
-                        episode.get("still_path"),
-                        episode.get("air_date"),
-                        episode.get("runtime")
-                    ))
+                if season_id and season_number == update_season_number or update_season_number == 0:
+                    season_info = query_tmdb(f"/tv/{title_tmdb_id}/season/{season_number}", {})
 
-                    # Collect episode images for downloading
-                    if episode.get("still_path"):
-                        episode_images_data.append({
-                            "season_number": season_number,
-                            "episode_number": episode.get("episode_number"),
-                            "still_path": episode.get("still_path")
-                        })
+                    for episode in season_info.get("episodes", []):
+                        if update_season_info:
+                            tv_episodes_params.append((
+                                season_id,
+                                title_id,
+                                episode.get("episode_number"),
+                                episode.get("name"),
+                                episode.get("vote_average"),
+                                episode.get("vote_count"),
+                                episode.get("overview"),
+                                episode.get("still_path"),
+                                episode.get("air_date"),
+                                episode.get("runtime")
+                            ))
 
-        if tv_episodes_params:
-            placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"] * len(tv_episodes_params))
-            query = f"""
-                INSERT INTO episodes (season_id, title_id, episode_number, episode_name, tmdb_vote_average,
-                                    tmdb_vote_count, overview, still_url, air_date, runtime)
-                VALUES {placeholders}
-                ON DUPLICATE KEY UPDATE
-                    episode_name = VALUES(episode_name),
-                    tmdb_vote_average = VALUES(tmdb_vote_average),
-                    tmdb_vote_count = VALUES(tmdb_vote_count),
-                    overview = VALUES(overview),
-                    still_url = VALUES(still_url),
-                    air_date = VALUES(air_date),
-                    runtime = VALUES(runtime)
-            """
-            flat_values = [item for sublist in tv_episodes_params for item in sublist]
-            query_mysql(query, flat_values)
+                        # Collect episode images for downloading
+                        # We do not check for update_season_images because they should be autofilled with update_season_info
+                        if episode.get("still_path"):
+                            episode_images_data.append({
+                                "season_number": season_number,
+                                "episode_number": episode.get("episode_number"),
+                                "still_path": episode.get("still_path")
+                            })
 
-        # Setup the episode images to download in the background
-        asyncio.create_task(store_episode_images(episode_images_data, title_id))
+            if tv_episodes_params:
+                placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"] * len(tv_episodes_params))
+                query = f"""
+                    INSERT INTO episodes (season_id, title_id, episode_number, episode_name, tmdb_vote_average,
+                                        tmdb_vote_count, overview, still_url, air_date, runtime)
+                    VALUES {placeholders}
+                    ON DUPLICATE KEY UPDATE
+                        episode_name = VALUES(episode_name),
+                        tmdb_vote_average = VALUES(tmdb_vote_average),
+                        tmdb_vote_count = VALUES(tmdb_vote_count),
+                        overview = VALUES(overview),
+                        still_url = VALUES(still_url),
+                        air_date = VALUES(air_date),
+                        runtime = VALUES(runtime)
+                """
+                flat_values = [item for sublist in tv_episodes_params for item in sublist]
+                query_mysql(query, flat_values)
+
+            # Setup the episode images to download in the background
+            asyncio.create_task(store_episode_images(episode_images_data, title_id, update_season_images))
 
         # Finally return the title_id for later use
         return title_id
@@ -2525,18 +2636,38 @@ async def add_title(data: dict):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
-@app.post("/watch_list/update_title_info")
-async def update_title_info(data: dict):
+@app.post("/watch_list/update_title")
+async def update_title(data: dict):
     title_type = data.get("title_type")
     title_tmdb_id = data.get("title_tmdb_id")
 
     if not title_tmdb_id or not title_type:
         raise HTTPException(status_code=422, detail="Missing 'title_tmdb_id' or 'title_type'.")
 
+    # Check what we are updating and if not given set to default values
+    update_title_info = data.get("update_title_info")
+    if update_title_info is None:
+        update_title_info = True
+    update_title_images = data.get("update_title_images")
+    if update_title_images is None:
+        update_title_images = False
+    
     if title_type == "movie":
-        await add_or_update_movie_title(title_tmdb_id)
+        await add_or_update_movie_title(title_tmdb_id, update_title_info, update_title_images)
+
     elif title_type == "tv":
-        await add_or_update_tv_title(title_tmdb_id)
+        # Handle tv specific ones
+        update_season_number = data.get("update_season_number")
+        if update_season_number is None:
+            update_season_number = 0
+        update_season_info = data.get("update_season_info")
+        if update_season_info is None:
+            update_season_info = False
+        update_season_images = data.get("update_season_images")
+        if update_season_images is None:
+            update_season_images = False
+        
+        await add_or_update_tv_title(title_tmdb_id, update_title_info, update_title_images, update_season_number, update_season_info, update_season_images)
     else:
         raise HTTPException(status_code=422, detail="Invalid 'title_type'. Must be 'movie' or 'tv'.")
 
