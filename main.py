@@ -2109,21 +2109,47 @@ def get_extra_info_from_omdb(imdb_id, title_id):
         omdb_result = query_omdb(imdb_id)
         print(omdb_result)
 
-        # Add awards, rotten tomatoes, director, writer
-        # Add awards, rotten tomatoes, director, writer
-
         omdb_insert_query = """
             UPDATE titles
             SET imdb_vote_average = %s,
-                imdb_vote_count = %s
+                imdb_vote_count = %s,
+                director = %s,
+                writer = %s,
+                awards = %s,
+                production_country = %s,
+                box_office = %s
             WHERE title_id = %s
         """
+        
+        imdb_rating = omdb_result.get("imdbRating")
+        imdb_votes = omdb_result.get("imdbVotes")
+        director = omdb_result.get("Director")
+        writer = omdb_result.get("Writer")
+        awards = omdb_result.get("Awards")
+        production_country = omdb_result.get("Country")
+        box_office = omdb_result.get("BoxOffice")
+
         omdb_insert_params = (
-            float(omdb_result.get("imdbRating")) if omdb_result.get("imdbRating") else None,
-            int(omdb_result.get("imdbVotes").replace(",", "")) if omdb_result.get("imdbVotes") else None,
+            imdb_rating if imdb_rating else None,
+            imdb_votes.replace(",", "") if imdb_votes else None,
+            director if director else None,
+            writer if writer else None,
+            awards if awards else None,
+            production_country if production_country else None,
+            box_office.replace(",", "").replace("$", "") if box_office else None,
             title_id
         )
         query_mysql(omdb_insert_query, omdb_insert_params)
+
+def format_FI_age_rating(rating):
+    rating = rating.upper()
+    if rating == 'S':
+        return rating
+    if 'K' not in rating:
+        rating = 'K' + rating
+    if '-' not in rating:
+        rating = rating[:1] + '-' + rating[1:]
+    return rating
 
 # Functions for the actual adding/updating of a movie or a tv-show
 async def add_or_update_movie_title(
@@ -2181,7 +2207,7 @@ async def add_or_update_movie_title(
             us_movie_title_age_rating = None
             for release in movie_title_info['releases']['countries']:
                 if release['iso_3166_1'] == 'FI':
-                    movie_title_age_rating = release['certification']
+                    movie_title_age_rating = format_FI_age_rating(release['certification'])
                     break
                 elif release['iso_3166_1'] == 'US' and release['certification'] != '':
                     us_movie_title_age_rating = release['certification']
@@ -2323,7 +2349,7 @@ async def add_or_update_tv_title(
                 us_tv_title_age_rating = None
                 for release in tv_title_info['content_ratings']['results']:
                     if release['iso_3166_1'] == 'FI':
-                        tv_title_age_rating = release['rating']
+                        tv_title_age_rating = format_FI_age_rating(release['rating'])
                         break
                     elif release['iso_3166_1'] == 'US' and release['rating'] != '':
                         us_tv_title_age_rating = release['rating']
@@ -3370,6 +3396,21 @@ def get_backdrop_count(title_id: int):
 
     return count
 
+def get_logo_type(title_id: int):
+    # Base path
+    base_path = "/fastapi-images"
+    
+    # Possible logo types/extensions to check
+    logo_types = ["png", "svg", "jpg", "jpeg", "webp"]
+
+    # Check for each type
+    for logo_type in logo_types:
+        logo_path = os.path.join(base_path, str(title_id), f"logo.{logo_type}")
+        if os.path.exists(logo_path):
+            return logo_type  # Return the first found type
+
+    return None  # Return None if no logo exists
+
 @app.get("/watch_list/get_title_info")
 def get_title_info(
     session_key: str = Query(...),
@@ -3406,7 +3447,12 @@ def get_title_info(
                 t.backdrop_url, 
                 t.movie_runtime, 
                 t.release_date,
+                t.box_office,
                 t.original_language,
+                t.production_country,
+                t.director,
+                t.writer,
+                t.awards,
                 t.age_rating,
                 t.trailer_key,
                 t.last_updated,
@@ -3443,16 +3489,22 @@ def get_title_info(
                 "backup_backdrop_url": title_query_results[13],
                 "movie_runtime": title_query_results[14],
                 "release_date": title_query_results[15],
-                "original_language": title_query_results[16],
-                "age_rating": title_query_results[17],
-                "trailer_key": title_query_results[18],
-                "title_info_last_updated": title_query_results[19],
-                "user_title_watch_count": title_query_results[20],
-                "user_title_notes": title_query_results[21],
-                "user_title_favourite": title_query_results[22],
-                "user_title_last_updated": title_query_results[23],
-                "title_genres": title_query_results[24].split(", ") if title_query_results[24] else [],
-                "backdrop_image_count": get_backdrop_count(title_query_results[0])
+                "box_office": title_query_results[16],
+                "original_language": title_query_results[17],
+                "production_country": title_query_results[18],
+                "director": title_query_results[19],
+                "writer": title_query_results[20],
+                "awards": title_query_results[21],
+                "age_rating": title_query_results[22],
+                "trailer_key": title_query_results[23],
+                "title_info_last_updated": title_query_results[24],
+                "user_title_watch_count": title_query_results[25],
+                "user_title_notes": title_query_results[26],
+                "user_title_favourite": title_query_results[27],
+                "user_title_last_updated": title_query_results[28],
+                "title_genres": title_query_results[29].split(", ") if title_query_results[29] else [],
+                "backdrop_image_count": get_backdrop_count(title_query_results[0]),
+                "logo_file_type": get_logo_type(title_query_results[0])
             }
         else:
             raise HTTPException(status_code=404, detail="The title doesn't exist.")
@@ -3476,7 +3528,12 @@ def get_title_info(
                 t.backdrop_url, 
                 t.movie_runtime, 
                 t.release_date,
+                t.box_office,
                 t.original_language,
+                t.production_country,
+                t.director,
+                t.writer,
+                t.awards,
                 t.age_rating,
                 t.trailer_key,
                 t.last_updated,
@@ -3508,17 +3565,23 @@ def get_title_info(
                 "backup_backdrop_url": title_query_results_not_on_list[13],
                 "movie_runtime": title_query_results_not_on_list[14],
                 "release_date": title_query_results_not_on_list[15],
-                "original_language": title_query_results_not_on_list[16],
-                "age_rating": title_query_results_not_on_list[17],
-                "trailer_key": title_query_results_not_on_list[18],
+                "box_office": title_query_results[16],
+                "original_language": title_query_results[17],
+                "production_country": title_query_results[18],
+                "director": title_query_results[19],
+                "writer": title_query_results[20],
+                "awards": title_query_results[21],
+                "age_rating": title_query_results_not_on_list[22],
+                "trailer_key": title_query_results_not_on_list[23],
                 # Skip this one
-                "title_info_last_updated": title_query_results_not_on_list[20],
+                "title_info_last_updated": title_query_results_not_on_list[24],
                 "user_title_watch_count": -1,
                 "user_title_notes": None,
                 "user_title_favourite": None,
                 "user_title_last_updated": None,
-                "title_genres": title_query_results_not_on_list[20].split(", ") if title_query_results_not_on_list[20] else [],
-                "backdrop_image_count": get_backdrop_count(title_query_results_not_on_list[0])
+                "title_genres": title_query_results_not_on_list[24].split(", ") if title_query_results_not_on_list[24] else [],
+                "backdrop_image_count": get_backdrop_count(title_query_results_not_on_list[0]),
+                "logo_file_type": get_logo_type(title_query_results[0])
             }
         else:
             raise HTTPException(status_code=404, detail="The title doesn't exist.")

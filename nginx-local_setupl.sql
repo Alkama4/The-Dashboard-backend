@@ -89,7 +89,12 @@ CREATE TABLE IF NOT EXISTS titles (
     backdrop_url VARCHAR(255),  -- Serve as a backup I guess for now
     movie_runtime INT DEFAULT NULL,
     release_date DATE DEFAULT NULL,
-    original_language VARCHAR(10),
+    box_office INT,
+    original_language VARCHAR(64),
+    production_country VARCHAR(64),
+    director VARCHAR(64),
+    writer VARCHAR(64),
+    awards VARCHAR(255),
     age_rating VARCHAR(10),
     trailer_key CHAR(11),
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
