@@ -77,23 +77,22 @@ CREATE TABLE IF NOT EXISTS titles (
     tmdb_id INT UNIQUE,
     imdb_id VARCHAR(10),
     type ENUM('movie', 'tv') NOT NULL,
-    title_name VARCHAR(255) NOT NULL,
-    title_name_original VARCHAR(255),
+    name VARCHAR(255),
+    name_original VARCHAR(255),
     tagline VARCHAR(255),
     tmdb_vote_average DECIMAL(3,1),
     tmdb_vote_count INT,
     imdb_vote_average DECIMAL(3,1),
     imdb_vote_count INT,
     overview TEXT,
-    poster_url VARCHAR(255),    -- Serve as a backup I guess for now
-    backdrop_url VARCHAR(255),  -- Serve as a backup I guess for now
+    backup_poster_url VARCHAR(255),    -- Serve as a backup for standalone and other uses
+    backup_backdrop_url VARCHAR(255),  -- Serve as a backup for standalone and other uses
     movie_runtime INT DEFAULT NULL,
     release_date DATE DEFAULT NULL,
-    box_office INT,
+    revenue BIGINT,
+    budget BIGINT,
     original_language VARCHAR(64),
-    production_country VARCHAR(64),
-    director VARCHAR(64),
-    writer VARCHAR(64),
+    origin_country VARCHAR(64),
     awards VARCHAR(255),
     age_rating VARCHAR(10),
     trailer_key CHAR(11),
@@ -110,7 +109,7 @@ CREATE TABLE IF NOT EXISTS seasons (
     tmdb_vote_count INT,
     episode_count SMALLINT,
     overview TEXT,
-    poster_url VARCHAR(255),    
+    backup_poster_url VARCHAR(255),    
     -- For the air date use season[0].air_date
     FOREIGN KEY (title_id) REFERENCES titles(title_id) ON DELETE CASCADE,
     UNIQUE(title_id, season_number), -- Add this unique constraint
@@ -127,7 +126,7 @@ CREATE TABLE IF NOT EXISTS episodes (
     tmdb_vote_average DECIMAL(3,1),
     tmdb_vote_count INT,
     overview TEXT,
-    still_url VARCHAR(255),
+    backup_still_url VARCHAR(255),
     air_date DATE DEFAULT NULL,
     runtime INT DEFAULT NULL,
     FOREIGN KEY (season_id) REFERENCES seasons(season_id) ON DELETE CASCADE,

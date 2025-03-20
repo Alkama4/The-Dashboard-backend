@@ -47,7 +47,7 @@ semaphore = asyncio.Semaphore(5)
 # - - - - - - - - - - - - - - - - - - - - #
 
 # Function to connect to MySQL and perform a query
-def query_mysql(query: str, params: tuple = (), fetch_last_row_id=False):
+def query_mysql(query: str, params: tuple = (), fetch_last_row_id=False, use_dictionary=False):
     try:
         # Test to see if it can communicate on the bridge network and if that makes a difference
         # mysql_host = "172.18.0.3"
@@ -68,7 +68,7 @@ def query_mysql(query: str, params: tuple = (), fetch_last_row_id=False):
         if conn is None:
             raise HTTPException(status_code=500, detail="Failed to establish database connection.")
 
-        cursor = conn.cursor()
+        cursor = conn.cursor(dictionary=use_dictionary)
 
         # Execute the query
         cursor.execute(query, params)
@@ -2104,39 +2104,28 @@ def add_or_update_genres_for_title(title_id, tmdb_genres):
         query_mysql(insert_genre_query)
 
 # Used for both tv and movies the same way to unify with a function
+# Get just the stuff that we can't get from tmdb
 def get_extra_info_from_omdb(imdb_id, title_id):
     if imdb_id and title_id:
         omdb_result = query_omdb(imdb_id)
-        print(omdb_result)
+        # print(omdb_result)
 
         omdb_insert_query = """
             UPDATE titles
             SET imdb_vote_average = %s,
                 imdb_vote_count = %s,
-                director = %s,
-                writer = %s,
-                awards = %s,
-                production_country = %s,
-                box_office = %s
+                awards = %s
             WHERE title_id = %s
         """
         
         imdb_rating = omdb_result.get("imdbRating")
         imdb_votes = omdb_result.get("imdbVotes")
-        director = omdb_result.get("Director")
-        writer = omdb_result.get("Writer")
         awards = omdb_result.get("Awards")
-        production_country = omdb_result.get("Country")
-        box_office = omdb_result.get("BoxOffice")
 
         omdb_insert_params = (
             imdb_rating if imdb_rating else None,
-            imdb_votes.replace(",", "") if imdb_votes else None,
-            director if director else None,
-            writer if writer else None,
-            awards if awards else None,
-            production_country if production_country else None,
-            box_office.replace(",", "").replace("$", "") if box_office else None,
+            imdb_votes.replace(",", "") if imdb_votes and imdb_votes != "N/A" else None,
+            awards if awards and awards != "N/A" else None,
             title_id
         )
         query_mysql(omdb_insert_query, omdb_insert_params)
@@ -2165,48 +2154,11 @@ async def add_or_update_movie_title(
                 "include_image_language": "en,null",
             })
 
-            # Insert the movie into titles
-            query = """
-                INSERT INTO titles (
-                    tmdb_id, 
-                    imdb_id, 
-                    type, 
-                    title_name, 
-                    title_name_original, 
-                    tagline, 
-                    tmdb_vote_average, 
-                    tmdb_vote_count, 
-                    overview, 
-                    poster_url, 
-                    backdrop_url, 
-                    movie_runtime, 
-                    release_date,
-                    original_language,
-                    age_rating,
-                    trailer_key
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE 
-                    imdb_id = VALUES(imdb_id),
-                    title_name = VALUES(title_name),
-                    title_name_original = VALUES(title_name_original),
-                    tagline = VALUES(tagline),
-                    tmdb_vote_average = VALUES(tmdb_vote_average),
-                    tmdb_vote_count = VALUES(tmdb_vote_count),
-                    overview = VALUES(overview),
-                    poster_url = VALUES(poster_url),
-                    backdrop_url = VALUES(backdrop_url),
-                    release_date = VALUES(release_date),
-                    original_language = VALUES(original_language),
-                    age_rating = VALUES(age_rating),
-                    trailer_key = VALUES(trailer_key);
-            """
-
             # Retrieve the age rating
             movie_title_age_rating = None
             us_movie_title_age_rating = None
             for release in movie_title_info['releases']['countries']:
-                if release['iso_3166_1'] == 'FI':
+                if release['iso_3166_1'] == 'FI' and release['certification']:
                     movie_title_age_rating = format_FI_age_rating(release['certification'])
                     break
                 elif release['iso_3166_1'] == 'US' and release['certification'] != '':
@@ -2226,6 +2178,13 @@ async def add_or_update_movie_title(
                     if video["official"] == True:
                         break
 
+            # Retrieve the production countries and just add them up to a list
+            movie_title_production_countries = ""
+            for country in movie_title_info.get('production_countries', []):
+                if movie_title_production_countries:
+                    movie_title_production_countries += ", "
+                movie_title_production_countries += country["name"]
+
             # Generate params
             params = (
                 movie_title_info.get('id'),
@@ -2243,8 +2202,59 @@ async def add_or_update_movie_title(
                 movie_title_info.get('release_date'),
                 movie_title_info.get('original_language'),
                 movie_title_age_rating,
-                movie_title_trailer_key
+                movie_title_trailer_key,
+                movie_title_info.get('revenue'),
+                movie_title_info.get('budget'),
+                movie_title_production_countries
             )
+
+            # Generate placeholders based on params
+            placeholders = ', '.join(['%s'] * len(params))
+            # Create query and place placholders in it
+            query = f"""
+                INSERT INTO titles (
+                    tmdb_id,
+                    imdb_id,
+                    type,
+                    name,
+                    name_original,
+                    tagline,
+                    tmdb_vote_average,
+                    tmdb_vote_count,
+                    overview,
+                    backup_poster_url,
+                    backup_backdrop_url,
+                    movie_runtime,
+                    release_date,
+                    original_language,
+                    age_rating,
+                    trailer_key,
+                    revenue,
+                    budget,
+                    production_countries
+                )
+                VALUES ({placeholders})
+                ON DUPLICATE KEY UPDATE 
+                    imdb_id = VALUES(imdb_id),
+                    name = VALUES(name),
+                    name_original = VALUES(name_original),
+                    tagline = VALUES(tagline),
+                    tmdb_vote_average = VALUES(tmdb_vote_average),
+                    tmdb_vote_count = VALUES(tmdb_vote_count),
+                    overview = VALUES(overview),
+                    backup_poster_url = VALUES(backup_poster_url),
+                    backup_backdrop_url = VALUES(backup_backdrop_url),
+                    movie_runtime = VALUES(movie_runtime),
+                    release_date = VALUES(release_date),
+                    original_language = VALUES(original_language),
+                    age_rating = VALUES(age_rating),
+                    trailer_key = VALUES(trailer_key),
+                    revenue = VALUES(revenue),
+                    budget = VALUES(budget),
+                    production_countries = VALUES(production_countries);
+            """
+
+            # Actual query
             title_id = query_mysql(query, params, fetch_last_row_id=True)
 
             # When updating the fetch_last_row_id returns a 0 for some reason so fetch the id seperately
@@ -2307,51 +2317,15 @@ async def add_or_update_tv_title(
                 })
 
                 # - - - TITLE - - - 
-                # Insert the tv-series info into titles
-                tv_title_query = """
-                    INSERT INTO titles (
-                        tmdb_id, 
-                        imdb_id, 
-                        type, 
-                        title_name, 
-                        title_name_original, 
-                        tagline, 
-                        tmdb_vote_average, 
-                        tmdb_vote_count, 
-                        overview, 
-                        poster_url, 
-                        backdrop_url, 
-                        movie_runtime, 
-                        release_date,
-                        original_language,
-                        age_rating,
-                        trailer_key
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON DUPLICATE KEY UPDATE 
-                        imdb_id = VALUES(imdb_id),
-                        title_name = VALUES(title_name),
-                        title_name_original = VALUES(title_name_original),
-                        tagline = VALUES(tagline),
-                        tmdb_vote_average = VALUES(tmdb_vote_average),
-                        tmdb_vote_count = VALUES(tmdb_vote_count),
-                        overview = VALUES(overview),
-                        poster_url = VALUES(poster_url),
-                        backdrop_url = VALUES(backdrop_url),
-                        release_date = VALUES(release_date),
-                        original_language = VALUES(original_language),
-                        age_rating = VALUES(age_rating),
-                        trailer_key = VALUES(trailer_key);
-                """
 
                 # Retrieve the age rating
                 tv_title_age_rating = None
                 us_tv_title_age_rating = None
                 for release in tv_title_info['content_ratings']['results']:
-                    if release['iso_3166_1'] == 'FI':
+                    if release['iso_3166_1'] == 'FI' and release['rating']:
                         tv_title_age_rating = format_FI_age_rating(release['rating'])
                         break
-                    elif release['iso_3166_1'] == 'US' and release['rating'] != '':
+                    elif release['iso_3166_1'] == 'US' and release['rating']:
                         us_tv_title_age_rating = release['rating']
 
                 if tv_title_age_rating == None:
@@ -2368,8 +2342,16 @@ async def add_or_update_tv_title(
                         if video["official"] == True:
                             break
 
+                # Retrieve the imdb id seperately since it's not part of the base query like in movies
                 imdb_id = tv_title_info.get('external_ids', {}).get('imdb_id')
-                
+
+                # Retrieve the production countries and just add them up to a list
+                tv_title_production_countries = ""
+                for country in tv_title_info.get('production_countries', []):
+                    if tv_title_production_countries:
+                        tv_title_production_countries += ", "
+                    tv_title_production_countries += country["name"]
+                    
                 tv_title_params = (
                     tv_title_info.get('id'),
                     imdb_id,
@@ -2382,12 +2364,56 @@ async def add_or_update_tv_title(
                     tv_title_info.get('overview'),
                     tv_title_info.get('poster_path'),
                     tv_title_info.get('backdrop_path'),
-                    None,   # there's no runtime since its tv
+                    # there's no runtime since its tv
                     tv_title_info.get('first_air_date'),
                     tv_title_info.get('original_language'),
                     tv_title_age_rating,
-                    tv_title_trailer_key
+                    tv_title_trailer_key,
+                    # tv_title_info.get('revenue'), # Doesn't seem to exist on tv
+                    # tv_title_info.get('budget'),  # Doesn't seem to exist on tv
+                    tv_title_production_countries
                 )
+
+                # Generate placeholders based on params
+                tv_title_placeholders = ', '.join(['%s'] * len(tv_title_params))
+                # Create query and place placholders in it
+                tv_title_query = f"""
+                    INSERT INTO titles (
+                        tmdb_id, 
+                        imdb_id, 
+                        type, 
+                        name, 
+                        name_original, 
+                        tagline, 
+                        tmdb_vote_average, 
+                        tmdb_vote_count, 
+                        overview, 
+                        backup_poster_url, 
+                        backup_backdrop_url, 
+                        release_date,
+                        original_language,
+                        age_rating,
+                        trailer_key,
+                        production_countries
+                    )
+                    VALUES ({tv_title_placeholders})
+                    ON DUPLICATE KEY UPDATE 
+                        imdb_id = VALUES(imdb_id),
+                        name = VALUES(name),
+                        name_original = VALUES(name_original),
+                        tagline = VALUES(tagline),
+                        tmdb_vote_average = VALUES(tmdb_vote_average),
+                        tmdb_vote_count = VALUES(tmdb_vote_count),
+                        overview = VALUES(overview),
+                        backup_poster_url = VALUES(backup_poster_url),
+                        backup_backdrop_url = VALUES(backup_backdrop_url),
+                        release_date = VALUES(release_date),
+                        original_language = VALUES(original_language),
+                        age_rating = VALUES(age_rating),
+                        trailer_key = VALUES(trailer_key),
+                        production_countries = VALUES(production_countries);
+                """
+
                 # Set id fetch to False since it often fails
                 title_id = query_mysql(tv_title_query, tv_title_params, True)
 
@@ -2444,7 +2470,7 @@ async def add_or_update_tv_title(
                 if tv_seasons_params:
                     placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s)"] * len(tv_seasons_params))
                     query = f"""
-                        INSERT INTO seasons (title_id, season_number, season_name, tmdb_vote_average, tmdb_vote_count, episode_count, overview, poster_url)
+                        INSERT INTO seasons (title_id, season_number, season_name, tmdb_vote_average, tmdb_vote_count, episode_count, overview, backup_poster_url)
                         VALUES {placeholders}
                         ON DUPLICATE KEY UPDATE
                             season_name = VALUES(season_name),
@@ -2452,7 +2478,7 @@ async def add_or_update_tv_title(
                             tmdb_vote_count = VALUES(tmdb_vote_count),
                             episode_count = VALUES(episode_count),
                             overview = VALUES(overview),
-                            poster_url = VALUES(poster_url)
+                            backup_poster_url = VALUES(backup_poster_url)
                     """
                     flat_values = [item for sublist in tv_seasons_params for item in sublist]
                     query_mysql(query, flat_values)
@@ -2582,14 +2608,14 @@ async def add_or_update_tv_title(
                 placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"] * len(tv_episodes_params))
                 query = f"""
                     INSERT INTO episodes (season_id, title_id, episode_number, episode_name, tmdb_vote_average,
-                                        tmdb_vote_count, overview, still_url, air_date, runtime)
+                                        tmdb_vote_count, overview, backup_still_url, air_date, runtime)
                     VALUES {placeholders}
                     ON DUPLICATE KEY UPDATE
                         episode_name = VALUES(episode_name),
                         tmdb_vote_average = VALUES(tmdb_vote_average),
                         tmdb_vote_count = VALUES(tmdb_vote_count),
                         overview = VALUES(overview),
-                        still_url = VALUES(still_url),
+                        backup_still_url = VALUES(backup_still_url),
                         air_date = VALUES(air_date),
                         runtime = VALUES(runtime)
                 """
@@ -2603,6 +2629,7 @@ async def add_or_update_tv_title(
         return title_id
 
     except Exception as e:
+        print(f"Internal server error: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.post("/watch_list/add_user_title")
@@ -2714,7 +2741,7 @@ async def update_title_images(data: dict):
 
 
 @app.post("/watch_list/remove_user_title")
-def remove_title(data: dict):
+def remove_user_title(data: dict):
     try:
         # Validate the session key
         session_key = data.get("session_key")
@@ -3011,14 +3038,14 @@ def get_title_cards(
     get_titles_query = """
         SELECT 
             t.title_id, 
-            t.title_name, 
+            t.name, 
             t.tmdb_vote_average, 
             t.tmdb_vote_count, 
             t.movie_runtime, 
             utd.watch_count, 
             t.type, 
             t.release_date,
-            t.poster_url,
+            t.backup_poster_url,
             (SELECT COUNT(season_id) FROM seasons WHERE title_id = t.title_id) AS season_count,
             (SELECT COUNT(episode_id) FROM episodes WHERE title_id = t.title_id) AS episode_count,
             utd.favourite,
@@ -3105,14 +3132,14 @@ def get_title_cards(
     get_titles_query += """
         GROUP BY
             t.title_id, 
-            t.title_name, 
+            t.name, 
             t.tmdb_vote_average, 
             t.tmdb_vote_count, 
             t.movie_runtime, 
             utd.watch_count, 
             t.type, 
             t.release_date,
-            t.poster_url,
+            t.backup_poster_url,
             utd.favourite
     """
 
@@ -3185,15 +3212,15 @@ def list_titles(
     get_titles_query = """
         SELECT 
             t.title_id, 
-            t.title_name, 
-            t.title_name_original, 
+            t.name, 
+            t.name_original, 
             t.tmdb_vote_average, 
             t.tmdb_vote_count, 
             t.movie_runtime, 
             utd.watch_count, 
             t.type, 
             t.release_date,
-            t.poster_url,
+            t.backup_poster_url,
             t.overview,
             (SELECT COUNT(season_id) FROM seasons WHERE title_id = t.title_id) AS season_count,
             (SELECT COUNT(episode_id) FROM episodes WHERE title_id = t.title_id) AS episode_count,
@@ -3281,14 +3308,14 @@ def list_titles(
     get_titles_query += """
         GROUP BY
             t.title_id, 
-            t.title_name, 
+            t.name, 
             t.tmdb_vote_average, 
             t.tmdb_vote_count, 
             t.movie_runtime, 
             utd.watch_count, 
             t.type, 
             t.release_date,
-            t.poster_url,
+            t.backup_poster_url,
             utd.favourite
     """
 
@@ -3419,183 +3446,62 @@ def get_title_info(
     # Get user_id and validate session key
     user_id = validateSessionKey(session_key, False)
 
-    # Check if user has added the title to their watchlist
-    check_watchlist_query = """
-        SELECT 1
-        FROM user_title_details
-        WHERE user_id = %s AND title_id = %s
+    # Fetch title details along with user-specific data (if available).
+    # Using LEFT JOIN ensures user details are included only if the title is in their watchlist,
+    # eliminating the need for a separate existence check.
+    get_titles_query = """
+        SELECT 
+            t.*, 
+            utd.watch_count, 
+            utd.notes, 
+            utd.favourite, 
+            utd.last_updated AS user_title_last_updated,
+            GROUP_CONCAT(g.genre_name ORDER BY g.genre_name SEPARATOR ', ') AS genres
+        FROM titles t
+        LEFT JOIN user_title_details utd ON utd.title_id = t.title_id AND utd.user_id = %s
+        LEFT JOIN title_genres tg ON t.title_id = tg.title_id
+        LEFT JOIN genres g ON tg.genre_id = g.genre_id
+        WHERE t.title_id = %s
+        GROUP BY t.title_id, utd.watch_count, utd.notes, utd.favourite, utd.last_updated;
     """
-    watchlist_exists = query_mysql(check_watchlist_query, (user_id, title_id))
 
-    if watchlist_exists:
-        # Base query for when title is in user's watchlist
-        get_titles_query = """
-            SELECT 
-                t.title_id,
-                t.tmdb_id, 
-                t.imdb_id, 
-                t.type, 
-                t.title_name, 
-                t.title_name_original, 
-                t.tagline, 
-                t.tmdb_vote_average, 
-                t.tmdb_vote_count, 
-                t.imdb_vote_average, 
-                t.imdb_vote_count, 
-                t.overview, 
-                t.poster_url, 
-                t.backdrop_url, 
-                t.movie_runtime, 
-                t.release_date,
-                t.box_office,
-                t.original_language,
-                t.production_country,
-                t.director,
-                t.writer,
-                t.awards,
-                t.age_rating,
-                t.trailer_key,
-                t.last_updated,
-                utd.watch_count,
-                utd.notes,
-                utd.favourite,
-                utd.last_updated,
-                GROUP_CONCAT(g.genre_name ORDER BY g.genre_name SEPARATOR ', ') AS genres
-            FROM user_title_details utd
-            JOIN titles t ON utd.title_id = t.title_id
-            LEFT JOIN title_genres tg ON t.title_id = tg.title_id
-            LEFT JOIN genres g ON tg.genre_id = g.genre_id
-            WHERE utd.user_id = %s AND utd.title_id = %s
-            GROUP BY t.title_id, utd.watch_count, utd.notes, utd.last_updated;
-        """
-        title_query_results_initial = query_mysql(get_titles_query, (user_id, title_id))
+    title_query_results = query_mysql(get_titles_query, (user_id, title_id), use_dictionary=True)
 
-        if title_query_results_initial:
-            title_query_results = title_query_results_initial[0]
-            title_info = {
-                "title_id": title_query_results[0],
-                "tmdb_id": title_query_results[1],
-                "imdb_id": title_query_results[2],
-                "type": title_query_results[3],
-                "name": title_query_results[4],
-                "original_name": title_query_results[5],
-                "tagline": title_query_results[6],
-                "tmdb_vote_average": title_query_results[7],
-                "tmdb_vote_count": title_query_results[8],
-                "imdb_vote_average": title_query_results[9],
-                "imdb_vote_count": title_query_results[10],
-                "overview": title_query_results[11],
-                "backup_poster_url": title_query_results[12],
-                "backup_backdrop_url": title_query_results[13],
-                "movie_runtime": title_query_results[14],
-                "release_date": title_query_results[15],
-                "box_office": title_query_results[16],
-                "original_language": title_query_results[17],
-                "production_country": title_query_results[18],
-                "director": title_query_results[19],
-                "writer": title_query_results[20],
-                "awards": title_query_results[21],
-                "age_rating": title_query_results[22],
-                "trailer_key": title_query_results[23],
-                "title_info_last_updated": title_query_results[24],
-                "user_title_watch_count": title_query_results[25],
-                "user_title_notes": title_query_results[26],
-                "user_title_favourite": title_query_results[27],
-                "user_title_last_updated": title_query_results[28],
-                "title_genres": title_query_results[29].split(", ") if title_query_results[29] else [],
-                "backdrop_image_count": get_backdrop_count(title_query_results[0]),
-                "logo_file_type": get_logo_type(title_query_results[0])
-            }
-        else:
-            raise HTTPException(status_code=404, detail="The title doesn't exist.")
-    else:
-        # Base query for when title is NOT in user's watchlist
-        get_titles_query_not_on_list = """
-            SELECT 
-                t.title_id,
-                t.tmdb_id, 
-                t.imdb_id, 
-                t.type, 
-                t.title_name, 
-                t.title_name_original, 
-                t.tagline, 
-                t.tmdb_vote_average, 
-                t.tmdb_vote_count, 
-                t.imdb_vote_average, 
-                t.imdb_vote_count, 
-                t.overview, 
-                t.poster_url, 
-                t.backdrop_url, 
-                t.movie_runtime, 
-                t.release_date,
-                t.box_office,
-                t.original_language,
-                t.production_country,
-                t.director,
-                t.writer,
-                t.awards,
-                t.age_rating,
-                t.trailer_key,
-                t.last_updated,
-                GROUP_CONCAT(g.genre_name ORDER BY g.genre_name SEPARATOR ', ') AS genres
-            FROM titles t
-            LEFT JOIN title_genres tg ON t.title_id = tg.title_id
-            LEFT JOIN genres g ON tg.genre_id = g.genre_id
-            WHERE t.title_id = %s
-            GROUP BY t.title_id;
-        """
-        title_query_results_not_on_list_initial = query_mysql(get_titles_query_not_on_list, (title_id,))
+    # Validate result
+    if not title_query_results:
+        raise HTTPException(status_code=404, detail="The title doesn't exist.")
 
-        if title_query_results_not_on_list_initial:
-            title_query_results_not_on_list = title_query_results_not_on_list_initial[0]
-            title_info = {
-                "title_id": title_query_results_not_on_list[0],
-                "tmdb_id": title_query_results_not_on_list[1],
-                "imdb_id": title_query_results_not_on_list[2],
-                "type": title_query_results_not_on_list[3],
-                "name": title_query_results_not_on_list[4],
-                "original_name": title_query_results_not_on_list[5],
-                "tagline": title_query_results_not_on_list[6],
-                "tmdb_vote_average": title_query_results_not_on_list[7],
-                "tmdb_vote_count": title_query_results_not_on_list[8],
-                "imdb_vote_average": title_query_results_not_on_list[9],
-                "imdb_vote_count": title_query_results_not_on_list[10],
-                "overview": title_query_results_not_on_list[11],
-                "backup_poster_url": title_query_results_not_on_list[12],
-                "backup_backdrop_url": title_query_results_not_on_list[13],
-                "movie_runtime": title_query_results_not_on_list[14],
-                "release_date": title_query_results_not_on_list[15],
-                "box_office": title_query_results[16],
-                "original_language": title_query_results[17],
-                "production_country": title_query_results[18],
-                "director": title_query_results[19],
-                "writer": title_query_results[20],
-                "awards": title_query_results[21],
-                "age_rating": title_query_results_not_on_list[22],
-                "trailer_key": title_query_results_not_on_list[23],
-                # Skip this one
-                "title_info_last_updated": title_query_results_not_on_list[24],
-                "user_title_watch_count": -1,
-                "user_title_notes": None,
-                "user_title_favourite": None,
-                "user_title_last_updated": None,
-                "title_genres": title_query_results_not_on_list[24].split(", ") if title_query_results_not_on_list[24] else [],
-                "backdrop_image_count": get_backdrop_count(title_query_results_not_on_list[0]),
-                "logo_file_type": get_logo_type(title_query_results[0])
-            }
-        else:
-            raise HTTPException(status_code=404, detail="The title doesn't exist.")
+    # Extract result as a dictionary
+    title_data = title_query_results[0]
+
+    # Build final dictionary by unpacking title_data and adding extra fields
+    title_info = {
+        **title_data,  # Includes all query results directly
+        "genres": title_data["genres"].split(", ") if title_data["genres"] else [], # Overwrite genres
+        "backdrop_image_count": get_backdrop_count(title_data["title_id"]),
+        "logo_file_type": get_logo_type(title_data["title_id"]),
+    }
 
     # Get the seasons and episodes if it's a TV show
     if title_info["type"] == "tv":
+        # Query to get seasons
         get_seasons_query = """
-            SELECT season_id, season_number, season_name, tmdb_vote_average, tmdb_vote_count, episode_count, overview, poster_url
+            SELECT 
+                season_id, 
+                season_number, 
+                season_name, 
+                tmdb_vote_average, 
+                tmdb_vote_count, 
+                episode_count, 
+                overview, 
+                backup_poster_url
             FROM seasons
             WHERE title_id = %s
             ORDER BY CASE WHEN season_number = 0 THEN 999 ELSE season_number END
         """
-        seasons = query_mysql(get_seasons_query, (title_id,))
+        seasons = query_mysql(get_seasons_query, (title_id,), use_dictionary=True)
 
+        # Query to get episodes with user-specific details
         get_episodes_query = """
             SELECT 
                 e.season_id, 
@@ -3605,10 +3511,10 @@ def get_title_info(
                 e.tmdb_vote_average, 
                 e.tmdb_vote_count, 
                 e.overview, 
-                e.still_url, 
+                e.backup_still_url, 
                 e.air_date, 
                 e.runtime, 
-                COALESCE(ued.watch_count, 0)
+                COALESCE(ued.watch_count, 0) AS watch_count
             FROM episodes e
             LEFT JOIN user_episode_details ued 
                 ON e.episode_id = ued.episode_id 
@@ -3616,39 +3522,15 @@ def get_title_info(
             WHERE e.title_id = %s
             ORDER BY e.season_id, e.episode_number;
         """
-        episodes = query_mysql(get_episodes_query, (user_id, title_id))
+        episodes = query_mysql(get_episodes_query, (user_id, title_id), use_dictionary=True)
 
         # Organizing data into seasons with episodes
-        season_map = {}
-        for season in seasons:
-            season_id = season[0]
-            season_map[season_id] = {
-                "season_id": season_id,
-                "season_number": season[1],
-                "season_name": season[2],
-                "tmdb_vote_average": season[3],
-                "vote_count": season[4],
-                "episode_count": season[5],
-                "overview": season[6],
-                "backup_poster_url": season[7],
-                "episodes": []
-            }
+        season_map = {s["season_id"]: {**s, "episodes": []} for s in seasons}
 
         for episode in episodes:
-            season_id = episode[0]
+            season_id = episode["season_id"]
             if season_id in season_map:
-                season_map[season_id]["episodes"].append({
-                    "episode_id": episode[1],
-                    "episode_number": episode[2],
-                    "episode_name": episode[3],
-                    "tmdb_vote_average": episode[4],
-                    "vote_count": episode[5],
-                    "overview": episode[6],
-                    "backup_still_url": episode[7],
-                    "air_date": episode[8],
-                    "runtime": episode[9],
-                    "watch_count": episode[10],
-                })
+                season_map[season_id]["episodes"].append(episode)
 
         title_info["seasons"] = list(season_map.values())
 
