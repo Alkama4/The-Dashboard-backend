@@ -37,7 +37,7 @@ def get_server_drives_info():
         return {"error": str(e)}
 
 
-@router.get("/logs/resource/get")
+@router.get("/logs/resources/get")
 def get_server_resource_logs(timeframe: str = Query(None)):
     try:
         # Build the WHERE clause based on the timeframe
@@ -266,7 +266,7 @@ def get_fastapi_request_data(timeframe: str = Query(None)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/logs/resource/store")
+@router.post("/logs/resources/store")
 def store_server_resource_logs(data: dict):
     try:
         # Insert the new log entry

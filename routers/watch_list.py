@@ -2,12 +2,10 @@
 import asyncio
 import os
 from pathlib import Path
-from PIL import Image
 from fastapi import HTTPException, Query, APIRouter
-from fastapi.responses import FileResponse
 
 # Internal imports
-from utils import query_mysql, query_tmdb, query_omdb, download_image, validate_session_key, add_to_cache
+from utils import query_mysql, query_tmdb, query_omdb, download_image, validate_session_key, add_to_cache, tmdbQueryCache
 
 # Create the router object for this module
 router = APIRouter()
@@ -125,7 +123,7 @@ def watch_list_search(
 # Used to get the images for a title and only the title. Seasons and episodes have a seperate one
 async def store_title_images(movie_images, title_id: str, replace_images = False):
     try:
-        base_path = f'/fastapi-images/{title_id}'
+        base_path = f'/fastapi-media/title/{title_id}'
         Path(base_path).mkdir(parents=True, exist_ok=True)
 
         tasks = []
@@ -1514,7 +1512,7 @@ def list_titles(
 
 def get_backdrop_count(title_id: int):
     # Path base
-    base_path = "/fastapi-images"
+    base_path = "/fastapi-media/title"
     
     # Count of backdrops that exist
     count = 0
@@ -1531,7 +1529,7 @@ def get_backdrop_count(title_id: int):
 
 def get_logo_type(title_id: int):
     # Base path
-    base_path = "/fastapi-images"
+    base_path = "/fastapi-media/title"
     
     # Possible logo types/extensions to check
     logo_types = ["png", "svg", "jpg", "jpeg", "webp"]
@@ -1642,28 +1640,6 @@ def get_title_info(
         title_info["seasons"] = list(season_map.values())
 
     return {"title_info": title_info}
-
-
-@router.get("/image/{image_path:path}")
-async def get_image(image_path: str, width: int = Query(None)):
-    base_path = "/fastapi-images"
-    full_path = os.path.join(base_path, image_path)
-
-    if not os.path.exists(full_path):
-        raise HTTPException(status_code=404, detail="Image doesn't exist.")
-    
-    if width and width in [300, 600, 900, 1200]:
-        resized_path = f"{os.path.splitext(full_path)[0]}_{width}{os.path.splitext(full_path)[1]}"
-        if not os.path.exists(resized_path):
-            img = Image.open(full_path)
-            aspect_ratio = img.height / img.width
-            new_height = int(width * aspect_ratio)
-            img = img.resize((width, new_height))
-            img.save(resized_path)
-
-        return FileResponse(resized_path)
-
-    return FileResponse(full_path)
 
 
 # Sort by options for future "/list_titles":
