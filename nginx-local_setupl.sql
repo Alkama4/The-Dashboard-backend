@@ -179,6 +179,25 @@ CREATE TABLE IF NOT EXISTS title_genres (
     FOREIGN KEY (genre_id) REFERENCES genres(genre_id) ON DELETE CASCADE
 );
 
+-- Collections
+DROP TABLE IF EXISTS user_collection;
+CREATE TABLE IF NOT EXISTS user_collection (
+    collection_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
+DROP TABLE IF EXISTS collection_title;
+CREATE TABLE IF NOT EXISTS collection_title (
+    collection_id INT NOT NULL,
+    title_id INT NOT NULL,
+    PRIMARY KEY (title_id, collection_id),
+    FOREIGN KEY (collection_id) REFERENCES user_collection(collection_id) ON DELETE CASCADE,
+    FOREIGN KEY (title_id) REFERENCES titles(title_id) ON DELETE CASCADE
+);
+
 
 
 --------------- SERVER LOGS ---------------

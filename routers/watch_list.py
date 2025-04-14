@@ -10,6 +10,7 @@ from utils import query_mysql, query_tmdb, query_omdb, download_image, validate_
 # Create the router object for this module
 router = APIRouter()
 
+
 # Used to manually update the genres if they change etc. In the past was ran always on start, but since it ran on all 4 workers the feature was removed. Basically only used if I were to wipe the whole db
 @router.get("/update_genres")
 def fetch_genres():
@@ -170,6 +171,7 @@ async def store_title_images(movie_images, title_id: str, replace_images = False
         print(f"store_title_images error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+
 async def store_season_images(tv_seasons, title_id: str, replace_images = False):
     try:
         tasks = []
@@ -202,6 +204,7 @@ async def store_season_images(tv_seasons, title_id: str, replace_images = False)
     except Exception as e:
         print(f"store_season_images error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
 
 async def store_episode_images(tv_episodes, title_id: str, replace_images = False):
     try:
@@ -237,6 +240,7 @@ async def store_episode_images(tv_episodes, title_id: str, replace_images = Fals
         print(f"store_episode_images error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+
 # Used for the tvs and movies to add the genres to a title avoid duplication
 def add_or_update_genres_for_title(title_id, tmdb_genres):
     if not tmdb_genres:
@@ -261,6 +265,7 @@ def add_or_update_genres_for_title(title_id, tmdb_genres):
     if genre_values:
         insert_genre_query = f"INSERT INTO title_genres (title_id, genre_id) VALUES {genre_values}"
         query_mysql(insert_genre_query)
+
 
 # Used for both tv and movies the same way to unify with a function
 # Get just the stuff that we can't get from tmdb
@@ -289,6 +294,7 @@ def get_extra_info_from_omdb(imdb_id, title_id):
         )
         query_mysql(omdb_insert_query, omdb_insert_params)
 
+
 def format_FI_age_rating(rating):
     rating = rating.upper()
     if rating == 'S':
@@ -298,6 +304,7 @@ def format_FI_age_rating(rating):
     if '-' not in rating:
         rating = rating[:1] + '-' + rating[1:]
     return rating
+
 
 # Functions for the actual adding/updating of a movie or a tv-show
 async def add_or_update_movie_title(
@@ -456,6 +463,7 @@ async def add_or_update_movie_title(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
 
 async def add_or_update_tv_title(
     title_tmdb_id,
@@ -791,6 +799,7 @@ async def add_or_update_tv_title(
         print(f"Internal server error: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+
 @router.post("/add_user_title")
 async def add_user_title(data: dict):
     try:
@@ -1019,6 +1028,7 @@ def convert_season_or_episode_id_to_title_id(season_id=None, episode_id=None):
 
     return title_id
 
+
 def keep_title_watch_count_up_to_date(user_id, title_id=None, season_id=None, episode_id=None):
     # If we don't have title_id, get it from season_id or episode_id
     if not title_id:
@@ -1045,6 +1055,7 @@ def keep_title_watch_count_up_to_date(user_id, title_id=None, season_id=None, ep
             ON DUPLICATE KEY UPDATE watch_count = %s
         """
         query_mysql(update_title_watch_count_query, (user_id, title_id, 1 if all_watched else 0, 1 if all_watched else 0))
+
 
 def get_updated_user_title_data(user_id: int, title_id: int):
     try:
@@ -1083,6 +1094,7 @@ def get_updated_user_title_data(user_id: int, title_id: int):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching updated data: {str(e)}")
+
 
 @router.post("/modify_title_watch_count")
 def modify_title_watch_count(data: dict):
@@ -1527,6 +1539,7 @@ def get_backdrop_count(title_id: int):
 
     return count
 
+
 def get_logo_type(title_id: int):
     # Base path
     base_path = "/fastapi-media/title"
@@ -1541,6 +1554,7 @@ def get_logo_type(title_id: int):
             return logo_type  # Return the first found type
 
     return None  # Return None if no logo exists
+
 
 @router.get("/get_title_info")
 def get_title_info(
@@ -1640,6 +1654,179 @@ def get_title_info(
         title_info["seasons"] = list(season_map.values())
 
     return {"title_info": title_info}
+
+# ------------ Collections ------------
+
+@router.post("/collection/create")
+def add_title_to_collection(data: dict):
+    session_key = data.get("session_key")
+    user_id = validate_session_key(session_key)
+
+    name = data.get("name")
+    description = data.get("description")
+
+    if (not name):
+        raise HTTPException(status_code=400, detail=f"Missing required parameter: name")
+    
+    query = """
+        INSERT INTO user_collection (user_id, name, description)
+        VALUES (%s, %s, %s)
+    """
+    query_mysql(query, (user_id, name, description))
+
+    return {
+        "message": "Collection created successfully!"
+    }
+
+
+@router.post("/collection/edit")
+def edit_collection(data: dict):
+    session_key = data.get("session_key")
+    user_id = validate_session_key(session_key)
+
+    collection_id = data.get("collection_id")
+    name = data.get("name")
+    description = data.get("description")
+
+    if not collection_id:
+        raise HTTPException(status_code=400, detail="Missing parameter: collection_id")
+
+    fields = []
+    values = []
+
+    if name is not None:
+        fields.append("name = %s")
+        values.append(name)
+    if description is not None:
+        fields.append("description = %s")
+        values.append(description)
+
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    query = f"""
+        UPDATE user_collection
+        SET {', '.join(fields)}
+        WHERE collection_id = %s AND user_id = %s
+    """
+    values.extend([collection_id, user_id])
+    query_mysql(query, tuple(values))
+
+    return {
+        "message": "Collection updated successfully!"
+    }
+
+
+@router.delete("/collection/delete")
+def delete_collection(data: dict):
+    session_key = data.get("session_key")
+    user_id = validate_session_key(session_key)
+
+    collection_id = data.get("collection_id")
+
+    if not collection_id:
+        raise HTTPException(status_code=400, detail="Missing parameter: collection_id")
+    
+    query = """
+        DELETE FROM user_collection 
+        WHERE user_id = %s AND collection_id = %s
+    """
+    query_mysql(query, (user_id, collection_id))
+
+    return {
+        "message": "Collection deleted successfully!"
+    }
+
+
+def list_collections(
+    session_key: str = Query(...),
+):
+    user_id = validate_session_key(session_key)
+
+    # Apparently mysql cannot return the data formatted correctly, but can get it all in one query, so we will use that since it's most efficient?
+    query = """
+        SELECT 
+            uc.collection_id,
+            uc.name AS collection_name,
+            uc.description,
+            t.title_id,
+            t.name AS title_name
+        FROM user_collection uc
+        LEFT JOIN collection_title ct ON uc.collection_id = ct.collection_id
+        LEFT JOIN titles t ON ct.title_id = t.title_id
+        WHERE uc.user_id = %s
+        ORDER BY uc.collection_id
+    """
+    rows = query_mysql(query, (user_id,), use_dictionary=True)
+
+    collections = {}
+    for row in rows:
+        cid = row["collection_id"]
+        if cid not in collections:
+            collections[cid] = {
+                "collection_id": cid,
+                "name": row["collection_name"],
+                "description": row["description"],
+                "titles": []
+            }
+        if row["title_id"]:
+            collections[cid]["titles"].append({
+                "title_id": row["title_id"],
+                "name": row["title_name"]
+            })
+
+    return list(collections.values())
+
+
+
+@router.post("/collection/add_title")
+def add_title_to_collection(data: dict):
+    session_key = data.get("session_key")
+    validate_session_key(session_key)
+
+    title_id = data.get("title_id")
+    collection_id = data.get("collection_id")
+
+    if (not title_id):
+        raise HTTPException(status_code=400, detail=f"Missing parameter: title_id")
+    if (not collection_id):
+        raise HTTPException(status_code=400, detail=f"Missing parameter: collection_id")
+    
+    query = """
+        INSERT INTO collection_title (collection_id, title_id)
+        VALUES (%s, %s)
+    """
+    query_mysql(query, (collection_id, title_id))
+
+    return {
+        "message": "Title added successfully to the collection!"
+    }
+
+
+@router.delete("/collection/remove_title")
+def remove_title_from_collection(data: dict):
+    session_key = data.get("session_key")
+    validate_session_key(session_key)
+
+    title_id = data.get("title_id")
+    collection_id = data.get("collection_id")
+
+    if (not title_id):
+        raise HTTPException(status_code=400, detail=f"Missing parameter: title_id")
+    if (not collection_id):
+        raise HTTPException(status_code=400, detail=f"Missing parameter: collection_id")
+    
+    query = """
+        DELETE FROM collection_title 
+        WHERE collection_id = %s AND title_id = %s
+    """
+    query_mysql(query, (collection_id, title_id))
+
+    return {
+        "message": "Title removed successfully from the collection!"
+    }
+
+
 
 
 # Sort by options for future "/list_titles":
