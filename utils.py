@@ -148,3 +148,30 @@ def add_to_cache(key, value):
     
     # Add the new item to the cache
     tmdbQueryCache[key] = value
+
+# Used to get settings values e.g. for title limit
+def fetch_user_settings(user_id: int, setting_name: str):
+    query = f"SELECT {setting_name} FROM user_settings WHERE user_id = %s"
+    result = query_mysql(query, (user_id,), use_dictionary=True)
+    return result[0][setting_name] if result else None
+
+
+# Used to format a time difference, created for backups
+def format_time_difference(delta):
+    days = delta.days
+    seconds = delta.seconds
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    seconds = seconds % 60
+
+    time_parts = []
+    if days > 0:
+        time_parts.append(f"{days}pv")
+    if hours > 0:
+        time_parts.append(f"{hours}h")
+    if minutes > 0:
+        time_parts.append(f"{minutes}min")
+    if seconds > 0:
+        time_parts.append(f"{seconds}s")
+
+    return " ".join(time_parts[:2])

@@ -77,7 +77,7 @@ def login(
     }
 
 
-@router.get("/get_login_status")
+@router.get("/login_status")
 def get_login_status(
     session_key: str = Query(...)
 ):
@@ -116,7 +116,7 @@ def logout(
     }
 
 
-@router.post("/create")
+@router.post("/")
 def create_account(data: dict):
 
     username = data.get("username")
@@ -167,7 +167,35 @@ def create_account(data: dict):
         raise HTTPException(status_code=400, detail="Missing username or password.")
 
 
-@router.post("/change_password")
+# The password should be asked twice etc on the front end,
+# but I guess on the backend we should just perform the deletion.
+@router.delete("/")
+def delete_account(data: dict):
+    try:
+        user_id = validate_session_key(data.get("session_key"), True)
+        password = data.get("password")
+
+        if password:
+            delete_user_query = """
+                DELETE FROM users 
+                WHERE user_id = %s AND password = %s;
+            """
+            delete_user_params = (user_id, password)
+            affected_rows = query_mysql(delete_user_query, delete_user_params)
+
+            if affected_rows == 0:
+                raise HTTPException(status_code=400, detail="Incorrect password.")
+
+            return {"message": "Your account and all the data related to it has been successfully deleted!"}
+
+        raise HTTPException(status_code=400, detail="Missing password.")
+
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@router.put("/password")
 def change_password(data: dict):
     try:
         user_id = validate_session_key(data.get("session_key"), True)
@@ -200,33 +228,6 @@ def change_password(data: dict):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
-# The password should be asked twice etc on the front end but I guess on the backend we should just do the thing.
-@router.post("/delete")
-def delete_account(data: dict):
-    try:
-        user_id = validate_session_key(data.get("session_key"), True)
-        password = data.get("password")
-
-        if password:
-            delete_user_query = """
-                DELETE FROM users 
-                WHERE user_id = %s AND password = %s;
-            """
-            delete_user_params = (user_id, password)
-            affected_rows = query_mysql(delete_user_query, delete_user_params)
-
-            if affected_rows == 0:
-                raise HTTPException(status_code=400, detail="Incorrect password.")
-
-            return {"message": "Your account and all the data related to it has been successfully deleted!"}
-
-        raise HTTPException(status_code=400, detail="Missing password.")
-
-    except Exception as e:
-        print(e)
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-
 # Valid settings so that adding more is simpler
 VALID_SETTINGS = [
     "transactions_load_limit",
@@ -234,7 +235,7 @@ VALID_SETTINGS = [
     "list_all_titles_load_limit"
 ]
 
-@router.get("/get_settings")
+@router.get("/settings")
 def get_settings(session_key: str):
     
     # Validate the sessionkey and get the user_id
@@ -250,7 +251,7 @@ def get_settings(session_key: str):
     return {setting: result[i] for i, setting in enumerate(VALID_SETTINGS)}
 
 
-@router.post("/update_settings")
+@router.put("/settings")
 def update_settings(data: dict):
     # Validate the sessionkey and get the user_id
     session_key = data.get("session_key")

@@ -5,13 +5,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # Internal imports
 from routers.account import router as account_router 
-from routers.analytics import router as analytics_router 
-from routers.backups import router as backups_router 
-from routers.charts import router as charts_router 
 from routers.media import router as media_router
 from routers.redirect import router as redirect_router 
 from routers.server import router as server_router 
-from routers.transactions import router as transactions_router 
+from routers.spendings import router as spendings_router 
 from routers.watch_list import router as watch_list_router 
 from utils import query_mysql
 
@@ -27,13 +24,10 @@ app.add_middleware(
 
 # Include the account routes in the FastAPI app
 app.include_router(account_router, prefix="/account", tags=["account"])
-app.include_router(analytics_router, prefix="/analytics", tags=["analytics"])
-app.include_router(backups_router, prefix="/backups", tags=["backups"])
-app.include_router(charts_router, prefix="/charts", tags=["charts"])
 app.include_router(media_router, prefix="/media", tags=["media"])
 app.include_router(redirect_router, prefix="/redirect", tags=["redirect"])
 app.include_router(server_router, prefix="/server", tags=["server"])
-app.include_router(transactions_router, prefix="/transactions", tags=["transactions"])
+app.include_router(spendings_router, prefix="/spendings", tags=["spendings"])
 app.include_router(watch_list_router, prefix="/watch_list", tags=["watch_list"])
 
 # - - - - - - - - - - - - - - - - - - - - #

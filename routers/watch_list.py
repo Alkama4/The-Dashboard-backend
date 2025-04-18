@@ -1,124 +1,16 @@
 # External imports
+from fastapi import HTTPException, APIRouter, Query, Depends
+from pydantic import BaseModel
+from typing import Optional
+from pathlib import Path
 import asyncio
 import os
-from pathlib import Path
-from fastapi import HTTPException, Query, APIRouter
 
 # Internal imports
-from utils import query_mysql, query_tmdb, query_omdb, download_image, validate_session_key, add_to_cache, tmdbQueryCache
+from utils import query_mysql, query_tmdb, query_omdb, download_image, validate_session_key, add_to_cache, fetch_user_settings, tmdbQueryCache
 
 # Create the router object for this module
 router = APIRouter()
-
-
-# Used to manually update the genres if they change etc. In the past was ran always on start, but since it ran on all 4 workers the feature was removed. Basically only used if I were to wipe the whole db
-@router.get("/update_genres")
-def fetch_genres():
-    # Fetch movie genres
-    movie_genres = query_tmdb("/genre/movie/list", {})
-    if movie_genres:
-        for genre in movie_genres.get("genres", []):
-            genre_id = genre.get("id")
-            genre_name = genre.get("name")
-            # Check if genre exists in the database
-            existing_genre = query_mysql("SELECT * FROM genres WHERE tmdb_genre_id = %s", (genre_id,))
-            if not existing_genre:
-                # Insert new genre
-                query_mysql("INSERT INTO genres (tmdb_genre_id, genre_name) VALUES (%s, %s)", (genre_id, genre_name))
-            else:
-                # Update genre if name changes
-                query_mysql("UPDATE genres SET genre_name = %s WHERE tmdb_genre_id = %s", (genre_name, genre_id))
-        print("Movie genres stored!")
-
-    # Fetch TV genres
-    tv_genres = query_tmdb("/genre/tv/list", {})
-    if tv_genres:
-        for genre in tv_genres.get("genres", []):
-            genre_id = genre.get("id")
-            genre_name = genre.get("name")
-            # Check if genre exists in the database
-            existing_genre = query_mysql("SELECT * FROM genres WHERE tmdb_genre_id = %s", (genre_id,))
-            if not existing_genre:
-                # Insert new genre
-                query_mysql("INSERT INTO genres (tmdb_genre_id, genre_name) VALUES (%s, %s)", (genre_id, genre_name))
-            else:
-                # Update genre if name changes
-                query_mysql("UPDATE genres SET genre_name = %s WHERE tmdb_genre_id = %s", (genre_name, genre_id))
-        print("TV genres stored!")
-
-    return {"Result": "Genres updated!",}
-
-
-# Acts as a middle man between TMDB search and vue. 
-# Adds proper genres and the fact wether the user has added the title or not.
-@router.get("/search")
-def watch_list_search(
-    session_key: str = Query(...),
-    title_category: str = Query(..., regex="^(Movie|TV)$"),
-    title_name: str = Query(None),
-):
-    global tmdbQueryCache
-
-    # Validate the session key and retrieve the user ID
-    user_id = validate_session_key(session_key, False)
-
-    # Fetch search results from cache or TMDB API
-    if title_name:
-        title_lower = title_name.lower()
-        search_results = tmdbQueryCache.get(title_lower)
-        if search_results is None:
-            search_results = query_tmdb(
-                f"/search/{title_category.lower()}",
-                {"query": title_name, "include_adult": False}
-            )
-            add_to_cache(title_lower, search_results)  # Store results in cache
-    else:
-        raise HTTPException(status_code=400, detail="Title name is required.")
-
-    # Retrieve genre mappings from the database
-    genre_query = "SELECT tmdb_genre_id, genre_name FROM genres"
-    genre_data = query_mysql(genre_query, ())
-    if not genre_data:
-        raise HTTPException(status_code=500, detail="Genres not found in the database.")
-    genre_dict = {genre[0]: genre[1] for genre in genre_data}
-
-    # Get the TMDB IDs from search results
-    tmdb_ids = [result.get('id') for result in search_results.get('results', [])]
-
-    # Fetch watchlist details (title_id) for the user
-    if tmdb_ids:
-        placeholders = ', '.join(['%s'] * len(tmdb_ids))
-
-        # Query to get title_id based on tmdb_id from the titles table
-        title_id_query = f"""
-            SELECT tmdb_id, title_id
-            FROM titles
-            WHERE tmdb_id IN ({placeholders})
-        """
-        title_id_data = query_mysql(title_id_query, (*tmdb_ids,))
-        title_id_dict = {row[0]: row[1] for row in title_id_data}
-
-        # Query to get user's watchlist details
-        watchlist_query = f"""
-            SELECT t.tmdb_id, t.title_id
-            FROM user_title_details utd
-            JOIN titles t ON utd.title_id = t.title_id
-            WHERE utd.user_id = %s AND t.tmdb_id IN ({placeholders})
-        """
-        watchlist_data = query_mysql(watchlist_query, (user_id, *tmdb_ids))
-        watchlist_dict = {row[0]: row[1] for row in watchlist_data}
-    else:
-        title_id_dict = {}
-        watchlist_dict = {}
-
-    # Process search results: add genre names, watchlist status, and title_id
-    for result in search_results.get('results', []):
-        result['genres'] = [genre_dict.get(genre_id, "Unknown") for genre_id in result.get('genre_ids', [])]
-        tmdb_id = result.get('id')
-        result['title_id'] = title_id_dict.get(tmdb_id)
-        result['in_watch_list'] = tmdb_id in watchlist_dict
-
-    return search_results
 
 
 # Used to get the images for a title and only the title. Seasons and episodes have a seperate one
@@ -308,14 +200,14 @@ def format_FI_age_rating(rating):
 
 # Functions for the actual adding/updating of a movie or a tv-show
 async def add_or_update_movie_title(
-    title_tmdb_id: int, 
+    tmdb_id: int, 
     update_title_info=True, 
     update_title_images=False
 ):
     try:
         if update_title_info:
             # Get the data from TMDB
-            movie_title_info = query_tmdb(f"/movie/{title_tmdb_id}", {
+            movie_title_info = query_tmdb(f"/movie/{tmdb_id}", {
                 "append_to_response": "images,releases,videos",
                 "include_image_language": "en,null",
             })
@@ -431,7 +323,7 @@ async def add_or_update_movie_title(
                     FROM titles
                     WHERE tmdb_id = %s
                 """
-                title_id = query_mysql(title_id_query, (title_tmdb_id,))[0][0]
+                title_id = query_mysql(title_id_query, (tmdb_id,))[0][0]
 
             # Handle genres using the seperate function
             add_or_update_genres_for_title(title_id, movie_title_info.get('genres', []))
@@ -444,7 +336,7 @@ async def add_or_update_movie_title(
         
         elif update_title_images:
             # Query just for the images if we aren't updating info and just updating images
-            title_images_data = query_tmdb(f"/movie/{title_tmdb_id}/images", {
+            title_images_data = query_tmdb(f"/movie/{tmdb_id}/images", {
                 "include_image_language": "en,null",
             })
             # Get the title_id from tmdb id
@@ -453,7 +345,7 @@ async def add_or_update_movie_title(
                 FROM titles
                 WHERE tmdb_id = %s
             """
-            title_id = query_mysql(title_id_query, (title_tmdb_id,))[0][0]
+            title_id = query_mysql(title_id_query, (tmdb_id,))[0][0]
 
         # Store the title related images
         # Handle the replacement check for each image. If we were to check also here it wouldn't automatically update missing images.
@@ -466,7 +358,7 @@ async def add_or_update_movie_title(
 
 
 async def add_or_update_tv_title(
-    title_tmdb_id,
+    tmdb_id,
     update_title_info=True, 
     update_title_images=False, 
     update_season_number=0,  # If 0 update all, or if > 0 uses the season number
@@ -478,7 +370,7 @@ async def add_or_update_tv_title(
         if update_title_info or update_title_images:
             if update_title_info:
                 # Get the data from tmdb
-                tv_title_info = query_tmdb(f"/tv/{title_tmdb_id}", {
+                tv_title_info = query_tmdb(f"/tv/{tmdb_id}", {
                     "append_to_response": "external_ids,images,content_ratings,videos", 
                     "include_image_language": "en,null"
                 })
@@ -592,7 +484,7 @@ async def add_or_update_tv_title(
                         FROM titles
                         WHERE tmdb_id = %s
                     """
-                    title_id = query_mysql(title_id_query, (title_tmdb_id,))[0][0]
+                    title_id = query_mysql(title_id_query, (tmdb_id,))[0][0]
 
                 # Handle genres using the function
                 add_or_update_genres_for_title(title_id, tv_title_info.get('genres', []))
@@ -663,10 +555,10 @@ async def add_or_update_tv_title(
                     FROM titles
                     WHERE tmdb_id = %s
                 """
-                title_id = query_mysql(title_id_query, (title_tmdb_id,))[0][0]
+                title_id = query_mysql(title_id_query, (tmdb_id,))[0][0]
 
                 # query just for the images and and general data for seasons images 
-                cut_down_tv_title_info = query_tmdb(f"/tv/{title_tmdb_id}", {
+                cut_down_tv_title_info = query_tmdb(f"/tv/{tmdb_id}", {
                     "append_to_response": "images", 
                     "include_image_language": "en,null"
                 })
@@ -704,7 +596,7 @@ async def add_or_update_tv_title(
                 FROM titles
                 WHERE tmdb_id = %s
             """
-            title_id = query_mysql(title_id_query, (title_tmdb_id,))[0][0]
+            title_id = query_mysql(title_id_query, (tmdb_id,))[0][0]
 
             # Get the seasons from mysql since we are updating a specific thing that we already have instead of the whole thing for TMDB
             seasons_query = """
@@ -745,7 +637,7 @@ async def add_or_update_tv_title(
                 season_id = season_id_map.get(season_number)
 
                 if season_id and season_number == update_season_number or update_season_number == 0:
-                    season_info = query_tmdb(f"/tv/{title_tmdb_id}/season/{season_number}", {})
+                    season_info = query_tmdb(f"/tv/{tmdb_id}/season/{season_number}", {})
 
                     for episode in season_info.get("episodes", []):
                         if update_season_info:
@@ -800,208 +692,148 @@ async def add_or_update_tv_title(
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
-@router.post("/add_user_title")
-async def add_user_title(data: dict):
-    try:
-        # Validate the session key
-        session_key = data.get("session_key")
-        user_id = validate_session_key(session_key)
+def build_titles_query(
+    user_id: int, 
+    title_type: Optional[str] = None, 
+    watched: Optional[bool] = None, 
+    favourite: Optional[bool] = None, 
+    released: Optional[bool] = None, 
+    started: Optional[bool] = None, 
+    all_titles: Optional[str] = None, 
+    search_term: Optional[str] = None, 
+    collection_id: Optional[int] = None, 
+    sort_by: Optional[str] = None, 
+    direction: Optional[str] = None, 
+    offset: int = 0, 
+    title_limit: Optional[int] = None
+):
+    query = """
+        SELECT
+            t.title_id,
+            t.tmdb_id,
+            t.name,
+            t.name_original,
+            t.tmdb_vote_average,
+            t.tmdb_vote_count,
+            t.movie_runtime,
+            COALESCE(utd.watch_count, 0) AS watch_count,
+            t.type,
+            t.release_date,
+            t.backup_poster_url,
+            t.overview,
+            (SELECT COUNT(season_id) FROM seasons WHERE title_id = t.title_id) AS season_count,
+            (SELECT COUNT(episode_id) FROM episodes WHERE title_id = t.title_id) AS episode_count,
+            utd.favourite,
+            utd.last_updated,
+            EXISTS (
+                SELECT 1
+                FROM episodes e
+                LEFT JOIN user_episode_details ued
+                    ON ued.episode_id = e.episode_id
+                    AND ued.user_id = utd.user_id
+                WHERE e.title_id = t.title_id
+                    AND e.air_date <= CURDATE()
+                    AND e.air_date >= DATE_SUB(CURDATE(), INTERVAL 14 DAY)
+                    AND COALESCE(ued.watch_count, 0) != 1
+                LIMIT 1
+            ) AS new_episodes,
+            CASE
+                WHEN utd.title_id IS NOT NULL THEN TRUE
+                ELSE FALSE
+            END AS is_in_watchlist,
+            GROUP_CONCAT(DISTINCT g.genre_name ORDER BY g.genre_name ASC SEPARATOR ', ') AS genres
+        FROM
+            titles t
+        LEFT JOIN
+            user_title_details utd ON utd.title_id = t.title_id AND utd.user_id = %s
+        LEFT JOIN
+            title_genres tg ON tg.title_id = t.title_id
+        LEFT JOIN
+            genres g ON tg.genre_id = g.genre_id
+        LEFT JOIN
+            collection_title ct ON ct.title_id = t.title_id
+        WHERE
+            1=1
+    """
+    query_params = [user_id]
 
-        # Check if the title already exists
-        title_tmdb_id = data.get("title_tmdb_id")
-        check_title_query = """
-            SELECT title_id 
-            FROM titles
-            WHERE tmdb_id = %s
-        """
-        title_id = query_mysql(check_title_query, (title_tmdb_id,))
-
-        # Add the title to the titles if it doesn't exist
-        if not title_id:
-            # Get and validate the type
-            title_type = str(data.get("title_type")).lower()
-            if title_type != "movie" and title_type != "tv":
-                raise HTTPException(status_code=400, detail="Invalid title_type value!")
-            
-            # Based on type store the data
-            if title_type == "movie":
-                title_id = await add_or_update_movie_title(title_tmdb_id)
-            elif title_type == "tv":
-                title_id = await add_or_update_tv_title(title_tmdb_id)
-            else:
-                raise HTTPException(status_code=500, detail="Internal server error")
-        else:
-            # Get rid of unnescary arrays and wraps from the check_title_query.
-            # The add movie title can give it properly so no need to do it for it.
-            try:
-                title_id = title_id[0][0]
-            except:
-                raise HTTPException(status_code=500, detail="Its this")
-
-        # Add the link between the title and the user
-        link_user_query = """
-            INSERT INTO user_title_details (user_id, title_id)
-            VALUES(%s, %s)
-        """
-        query_mysql(link_user_query, (user_id, title_id))
-
-        # If the query doesn't throw an error return success
-        return {
-            "success": True,
-            "title_id": title_id
-        }
-
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-
-@router.post("/update_title")
-async def update_title(data: dict):
-    title_type = data.get("title_type")
-    title_tmdb_id = data.get("title_tmdb_id")
-
-    if not title_tmdb_id or not title_type:
-        raise HTTPException(status_code=422, detail="Missing 'title_tmdb_id' or 'title_type'.")
-
-    # Check what we are updating and if not given set to default values
-    update_title_info = data.get("update_title_info")
-    if update_title_info is None:
-        update_title_info = True
-    update_title_images = data.get("update_title_images")
-    if update_title_images is None:
-        update_title_images = False
-    
-    if title_type == "movie":
-        await add_or_update_movie_title(title_tmdb_id, update_title_info, update_title_images)
-
-    elif title_type == "tv":
-        # Handle tv specific ones
-        update_season_number = data.get("update_season_number")
-        if update_season_number is None:
-            update_season_number = 0
-        update_season_info = data.get("update_season_info")
-        if update_season_info is None:
-            update_season_info = False
-        update_season_images = data.get("update_season_images")
-        if update_season_images is None:
-            update_season_images = False
-        
-        await add_or_update_tv_title(title_tmdb_id, update_title_info, update_title_images, update_season_number, update_season_info, update_season_images)
+    if all_titles == "all_titles":
+        pass
+    elif all_titles == "not_added":
+        query += " AND (utd.user_id != %s OR utd.user_id IS NULL)"
+        query_params.append(user_id)
     else:
-        raise HTTPException(status_code=422, detail="Invalid 'title_type'. Must be 'movie' or 'tv'.")
+        query += " AND utd.user_id = %s"
+        query_params.append(user_id)
 
-    return {"message": "Title information updated successfully."}
+    if title_type:
+        query += " AND t.type = %s"
+        query_params.append(title_type.lower())
 
+    if watched is True:
+        query += " AND utd.watch_count >= 1"
+    elif watched is False:
+        query += " AND (utd.watch_count <= 0 OR utd.watch_count IS NULL)"
 
-@router.post("/update_title_images")
-async def update_title_images(data: dict):
+    if favourite is True:
+        query += " AND utd.favourite = TRUE"
+    elif favourite is False:
+        query += " AND utd.favourite = FALSE"
 
-    # get title id from vue
-    # from title id query the tmdb id and title type
+    if released is True:
+        query += " AND t.release_date <= CURDATE()"
+    elif released is False:
+        query += " AND t.release_date > CURDATE()"
 
-    # Make a tmdb query for the tmdb images for the title 
-    # Make a function that removes images for title
-    # Use the made functions to query the images again in the bg
-
-    return {"message": "Not implemented"}
-
-
-@router.post("/remove_user_title")
-def remove_user_title(data: dict):
-    try:
-        # Validate the session key
-        session_key = data.get("session_key")
-        user_id = validate_session_key(session_key)
-
-        # Get the TMDB title ID
-        title_tmdb_id = data.get("title_tmdb_id")
-        if not title_tmdb_id:
-            raise HTTPException(status_code=400, detail="Missing title_tmdb_id")
-
-        # Remove title from user's watch list
-        remove_query = """
-            DELETE user_title_details FROM user_title_details
-            JOIN titles ON user_title_details.title_id = titles.title_id
-            WHERE user_title_details.user_id = %s AND titles.tmdb_id = %s
-        """
-        query_mysql(remove_query, (user_id, title_tmdb_id))
-
-        # Remove related episodes from user's episode details
-        remove_episodes_query = """
-            DELETE user_episode_details
-            FROM user_episode_details
-            JOIN episodes ON user_episode_details.episode_id = episodes.episode_id
-            WHERE user_episode_details.user_id = %s AND episodes.title_id = (
-                SELECT title_id FROM titles WHERE tmdb_id = %s
+    if started is True:
+        query += """
+            AND EXISTS (
+                SELECT 1
+                FROM user_episode_details ued
+                JOIN episodes e ON ued.episode_id = e.episode_id
+                WHERE ued.user_id = utd.user_id
+                AND e.title_id = t.title_id
+                AND ued.watch_count > 0
+                LIMIT 1
             )
         """
-        query_mysql(remove_episodes_query, (user_id, title_tmdb_id))
-
-        return {"success": True}
-    
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-
-@router.post("/save_user_title_notes")
-def save_user_title_notes(data: dict):
-    try:
-        # Validate the session key
-        session_key = data.get("session_key")
-        user_id = validate_session_key(session_key)
-
-        # Get the title ID and notes
-        notes = data.get("notes")
-        title_id = data.get("title_id")
-        if not title_id:
-            raise HTTPException(status_code=400, detail="Missing title_id")
-        
-        # Remove title from user's watch list
-        save_notes_query = """
-            UPDATE user_title_details
-            SET notes = %s
-            WHERE user_id = %s AND title_id = %s
+    elif started is False:
+        query += """
+            AND NOT EXISTS (
+                SELECT 1
+                FROM user_episode_details ued
+                JOIN episodes e ON ued.episode_id = e.episode_id
+                WHERE ued.user_id = utd.user_id
+                AND e.title_id = t.title_id
+                AND ued.watch_count > 0
+                LIMIT 1
+            )
         """
-        query_mysql(save_notes_query, (notes, user_id, title_id))
 
-        return {"message": "Notes updated successfully!"}
-    
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-    
+    if search_term:
+        query += " AND t.name LIKE %s"
+        query_params.append(f"%{search_term}%")
 
-@router.post("/toggle_title_favourite")
-def toggle_title_favourite(data: dict):
-    try:
-        # Validate the session key
-        session_key = data.get("session_key")
-        user_id = validate_session_key(session_key)
+    if collection_id is not None:
+        query += " AND ct.collection_id = %s"
+        query_params.append(collection_id)
 
-        # Get the title ID
-        title_id = data.get("title_id")
-        if not title_id:
-            raise HTTPException(status_code=400, detail="Missing title_id")
-        
-        # Remove title from user's watch list
-        save_notes_query = """
-            INSERT INTO user_title_details (user_id, title_id, favourite)
-            VALUES (%s, %s, NOT favourite)
-            ON DUPLICATE KEY UPDATE favourite = NOT favourite
-        """
-        query_mysql(save_notes_query, (user_id, title_id))
+    query += " GROUP BY t.title_id"
 
-        return {"message": "Favourite status toggled successfully!"}
-    
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+    direction = direction.upper() if direction else "DESC"
+
+    if sort_by == "release_date":
+        query += f" ORDER BY t.release_date {direction}"
+    elif sort_by == "latest_updated":
+        query += f" ORDER BY utd.last_updated {direction}"
+    else:
+        query += f" ORDER BY t.tmdb_vote_average {direction}"
+
+    if title_limit:
+        query += " LIMIT %s OFFSET %s"
+        query_params.extend([title_limit + 1, offset * title_limit])
+
+    return query, query_params
 
 
 def convert_season_or_episode_id_to_title_id(season_id=None, episode_id=None):
@@ -1096,91 +928,332 @@ def get_updated_user_title_data(user_id: int, title_id: int):
         raise HTTPException(status_code=500, detail=f"Error fetching updated data: {str(e)}")
 
 
-@router.post("/modify_title_watch_count")
-def modify_title_watch_count(data: dict):
+def get_backdrop_count(title_id: int):
+    # Path base
+    base_path = "/fastapi-media/title"
+    
+    # Count of backdrops that exist
+    count = 0
+
+    # Loop through the backdrops from 1 to 5
+    for i in range(1, 6):
+        image_path = os.path.join(base_path, str(title_id), f"backdrop{i}.jpg")
+        
+        # Check if the image exists
+        if os.path.exists(image_path):
+            count += 1
+
+    return count
+
+
+def get_logo_type(title_id: int):
+    # Base path
+    base_path = "/fastapi-media/title"
+    
+    # Possible logo types/extensions to check
+    logo_types = ["png", "svg", "jpg", "jpeg", "webp"]
+
+    # Check for each type
+    for logo_type in logo_types:
+        logo_path = os.path.join(base_path, str(title_id), f"logo.{logo_type}")
+        if os.path.exists(logo_path):
+            return logo_type  # Return the first found type
+
+    return None  # Return None if no logo exists
+
+
+def check_collection_ownership(collection_id: int, user_id: int):
+    query = """
+        SELECT 1 FROM user_collection
+        WHERE collection_id = %s AND user_id = %s
+    """
+    result = query_mysql(query, (collection_id, user_id), use_dictionary=True)
+    if not result:
+        raise HTTPException(status_code=403, detail="You do not own this collection.")
+
+
+# ------------ Titles ------------
+
+# Used to manually update the genres if they change etc. In the past was ran always on start, but since it ran on all 4 workers the feature was removed. Basically only used if I were to wipe the whole db
+@router.put("/titles/genres")
+def fetch_genres():
+    # Fetch movie genres
+    movie_genres = query_tmdb("/genre/movie/list", {})
+    if movie_genres:
+        for genre in movie_genres.get("genres", []):
+            genre_id = genre.get("id")
+            genre_name = genre.get("name")
+            # Check if genre exists in the database
+            existing_genre = query_mysql("SELECT * FROM genres WHERE tmdb_genre_id = %s", (genre_id,))
+            if not existing_genre:
+                # Insert new genre
+                query_mysql("INSERT INTO genres (tmdb_genre_id, genre_name) VALUES (%s, %s)", (genre_id, genre_name))
+            else:
+                # Update genre if name changes
+                query_mysql("UPDATE genres SET genre_name = %s WHERE tmdb_genre_id = %s", (genre_name, genre_id))
+        print("Movie genres stored!")
+
+    # Fetch TV genres
+    tv_genres = query_tmdb("/genre/tv/list", {})
+    if tv_genres:
+        for genre in tv_genres.get("genres", []):
+            genre_id = genre.get("id")
+            genre_name = genre.get("name")
+            # Check if genre exists in the database
+            existing_genre = query_mysql("SELECT * FROM genres WHERE tmdb_genre_id = %s", (genre_id,))
+            if not existing_genre:
+                # Insert new genre
+                query_mysql("INSERT INTO genres (tmdb_genre_id, genre_name) VALUES (%s, %s)", (genre_id, genre_name))
+            else:
+                # Update genre if name changes
+                query_mysql("UPDATE genres SET genre_name = %s WHERE tmdb_genre_id = %s", (genre_name, genre_id))
+        print("TV genres stored!")
+
+    return {"Result": "Genres updated!",}
+
+
+# Acts as a middle man between TMDB search and vue. 
+# Adds proper genres and the fact wether the user has added the title or not.
+@router.get("/titles/search")
+def watch_list_search(
+    session_key: str = Query(...),
+    title_category: str = Query(..., regex="^(Movie|TV)$"),
+    title_name: str = Query(None),
+):
+    global tmdbQueryCache
+
+    # Validate the session key and retrieve the user ID
+    user_id = validate_session_key(session_key, False)
+
+    # Fetch search results from cache or TMDB API
+    if title_name:
+        title_lower = title_name.lower()
+        search_results = tmdbQueryCache.get(title_lower)
+        if search_results is None:
+            search_results = query_tmdb(
+                f"/search/{title_category.lower()}",
+                {"query": title_name, "include_adult": False}
+            )
+            add_to_cache(title_lower, search_results)  # Store results in cache
+    else:
+        raise HTTPException(status_code=400, detail="Title name is required.")
+
+    # Retrieve genre mappings from the database
+    genre_query = "SELECT tmdb_genre_id, genre_name FROM genres"
+    genre_data = query_mysql(genre_query, ())
+    if not genre_data:
+        raise HTTPException(status_code=500, detail="Genres not found in the database.")
+    genre_dict = {genre[0]: genre[1] for genre in genre_data}
+
+    # Get the TMDB IDs from search results
+    tmdb_ids = [result.get('id') for result in search_results.get('results', [])]
+
+    # Fetch watchlist details (title_id) for the user
+    if tmdb_ids:
+        placeholders = ', '.join(['%s'] * len(tmdb_ids))
+
+        # Query to get title_id based on tmdb_id from the titles table
+        title_id_query = f"""
+            SELECT tmdb_id, title_id
+            FROM titles
+            WHERE tmdb_id IN ({placeholders})
+        """
+        title_id_data = query_mysql(title_id_query, (*tmdb_ids,))
+        title_id_dict = {row[0]: row[1] for row in title_id_data}
+
+        # Query to get user's watchlist details
+        watchlist_query = f"""
+            SELECT t.tmdb_id, t.title_id
+            FROM user_title_details utd
+            JOIN titles t ON utd.title_id = t.title_id
+            WHERE utd.user_id = %s AND t.tmdb_id IN ({placeholders})
+        """
+        watchlist_data = query_mysql(watchlist_query, (user_id, *tmdb_ids))
+        watchlist_dict = {row[0]: row[1] for row in watchlist_data}
+    else:
+        title_id_dict = {}
+        watchlist_dict = {}
+
+    # Process search results: add genre names, watchlist status, and title_id
+    for result in search_results.get('results', []):
+        result['genres'] = [genre_dict.get(genre_id, "Unknown") for genre_id in result.get('genre_ids', [])]
+        tmdb_id = result.get('id')
+        result['title_id'] = title_id_dict.get(tmdb_id)
+        result['in_watch_list'] = tmdb_id in watchlist_dict
+
+    return search_results
+
+
+# Allows both title_id and tmdb_id, while preferring title_id
+@router.post("/titles")
+async def add_user_title(data: dict):
+    try:
+        session_key = data.get("session_key")
+        user_id = validate_session_key(session_key)
+
+        title_id = data.get("title_id")
+        tmdb_id = data.get("tmdb_id")
+
+        # Prefer title_id if given, check if it exists
+        if title_id:
+            check_query = "SELECT 1 FROM titles WHERE title_id = %s"
+            exists = query_mysql(check_query, (title_id,))
+            if not exists:
+                title_id = None  # fallback to tmdb_id logic
+
+        # If no valid title_id, try getting it via tmdb_id
+        if not title_id and tmdb_id:
+            check_query = "SELECT title_id FROM titles WHERE tmdb_id = %s"
+            result = query_mysql(check_query, (tmdb_id,))
+            if result:
+                title_id = result[0][0]
+            else:
+                title_type = str(data.get("title_type", "")).lower()
+                if title_type not in {"movie", "tv"}:
+                    raise HTTPException(status_code=400, detail="Invalid title_type value!")
+
+                if title_type == "movie":
+                    title_id = await add_or_update_movie_title(tmdb_id)
+                else:
+                    title_id = await add_or_update_tv_title(tmdb_id)
+
+        if not title_id:
+            raise HTTPException(status_code=400, detail="Missing or invalid title_id/tmdb_id")
+
+        link_user_query = """
+            INSERT INTO user_title_details (user_id, title_id)
+            VALUES (%s, %s)
+        """
+        query_mysql(link_user_query, (user_id, title_id))
+
+        return {
+            "title_id": title_id,
+            "message": 'Title added successfully to your watchlist!'
+        }
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@router.put("/titles/{title_id}")
+async def update_title(title_id: int, data: dict):
+    title_type = data.get("title_type")
+
+    if not title_id or not title_type:
+        raise HTTPException(status_code=422, detail="Missing 'title_id' or 'title_type'.")
+
+    # Check what we are updating and if not given set to default values
+    update_title_info = data.get("update_title_info", True)
+    update_title_images = data.get("update_title_images", False)
+
+    # The "add_or_update_movie_title" uses tmdb_id for reasons so get it with the title_id
+    get_tmdb_id_query = """
+        SELECT tmdb_id 
+        FROM titles
+        WHERE title_id = %s
+    """
+    tmdb_id = query_mysql(get_tmdb_id_query, (title_id,))
+
+    
+    if title_type == "movie":
+        await add_or_update_movie_title(tmdb_id, update_title_info, update_title_images)
+
+    elif title_type == "tv":
+        # Handle tv specific ones
+        update_season_number = data.get("update_season_number")
+        if update_season_number is None:
+            update_season_number = 0
+        update_season_info = data.get("update_season_info")
+        if update_season_info is None:
+            update_season_info = False
+        update_season_images = data.get("update_season_images")
+        if update_season_images is None:
+            update_season_images = False
+        
+        await add_or_update_tv_title(tmdb_id, update_title_info, update_title_images, update_season_number, update_season_info, update_season_images)
+    else:
+        raise HTTPException(status_code=422, detail="Invalid 'title_type'. Must be 'movie' or 'tv'.")
+
+    return {"message": "Title information updated successfully."}
+
+
+@router.delete("/titles/{title_id}")
+def remove_user_title(title_id: int, data: dict):
     try:
         # Validate the session key
         session_key = data.get("session_key")
         user_id = validate_session_key(session_key)
 
-        # Get the type and chosen ID
-        type = data.get("type")
-        chosen_types_id = data.get("chosen_types_id")
-        if not type:
-            raise HTTPException(status_code=400, detail="Missing type.")
-        if not chosen_types_id:
-            raise HTTPException(status_code=400, detail="Missing chosen_types_id.")
+        # Remove title from user's watch list
+        remove_query = """
+            DELETE FROM user_title_details
+            WHERE user_id = %s AND title_id = %s
+        """
+        query_mysql(remove_query, (user_id, title_id))
 
-        new_state = data.get("new_state")
-        if new_state == "watched":
-            watch_count = 1
-        elif new_state == "unwatched":
-            watch_count = 0
-        else:
-            raise HTTPException(status_code=400, detail="Invalid new_state. Valid values are 'watched' and 'unwatched'.")
-
-        if type == "movie":
-            title_query = """
-                INSERT INTO user_title_details (user_id, title_id, watch_count)
-                VALUES (%s, %s, %s)
-                ON DUPLICATE KEY UPDATE watch_count = VALUES(watch_count)
-            """
-            query_mysql(title_query, (user_id, chosen_types_id, watch_count))
-
-        elif type == "tv":
-            episode_query = """
-                INSERT INTO user_episode_details (user_id, episode_id, watch_count)
-                SELECT %s, episode_id, %s
-                FROM episodes
-                WHERE title_id = %s
-                ON DUPLICATE KEY UPDATE watch_count = VALUES(watch_count);
-            """
-            query_mysql(episode_query, (user_id, watch_count, chosen_types_id))
-
-            # Check and fix title watch_count
-            keep_title_watch_count_up_to_date(user_id, title_id=chosen_types_id)
-
-        elif type == "season":
-            episode_query = """
-                INSERT INTO user_episode_details (user_id, episode_id, watch_count)
-                SELECT %s, episode_id, %s
-                FROM episodes
-                WHERE season_id = %s
-                ON DUPLICATE KEY UPDATE watch_count = VALUES(watch_count);
-            """
-            query_mysql(episode_query, (user_id, watch_count, chosen_types_id))
-
-            # Check and fix title watch_count
-            keep_title_watch_count_up_to_date(user_id, season_id=chosen_types_id)
-
-        elif type == "episode":
-            episode_query = """
-                INSERT INTO user_episode_details (user_id, episode_id, watch_count)
-                VALUES (%s, %s, %s)
-                ON DUPLICATE KEY UPDATE watch_count = VALUES(watch_count)
-            """
-            query_mysql(episode_query, (user_id, chosen_types_id, watch_count))
-
-            # Check and fix title watch_count
-            keep_title_watch_count_up_to_date(user_id, episode_id=chosen_types_id)
-        
-        else:
-            raise HTTPException(status_code=400, detail="Unknown type. Valid values are 'movie', 'tv', 'season', and 'episode'.")
-        
-        # Get the title_id for the updated data
-        if type == "episode":
-            title_id = convert_season_or_episode_id_to_title_id(episode_id=chosen_types_id)
-        elif type == "season":
-            title_id = convert_season_or_episode_id_to_title_id(season_id=chosen_types_id)
-        else:
-            title_id = chosen_types_id
-        
-        updated_data = get_updated_user_title_data(user_id, title_id)
+        # Remove related episodes from user's episode details
+        remove_episodes_query = """
+            DELETE user_episode_details
+            FROM user_episode_details
+            JOIN episodes ON user_episode_details.episode_id = episodes.episode_id
+            WHERE user_episode_details.user_id = %s AND episodes.title_id = %s
+        """
+        query_mysql(remove_episodes_query, (user_id, title_id))
 
         return {
-            "message": "Watched state updated successfully!",
-            "updated_data": updated_data
+            "success": True,
+            "message": 'Title removed from your watchlist successfully!'
         }
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@router.put("/titles/{title_id}/notes")
+def save_user_title_notes(title_id: int, data: dict):
+    try:
+        # Validate the session key
+        session_key = data.get("session_key")
+        user_id = validate_session_key(session_key)
+        notes = data.get("notes")
+        
+        # Remove title from user's watch list
+        save_notes_query = """
+            UPDATE user_title_details
+            SET notes = %s
+            WHERE user_id = %s AND title_id = %s
+        """
+        query_mysql(save_notes_query, (notes, user_id, title_id))
+
+        return {"message": "Notes updated successfully!"}
+    
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+    
+
+# Could be more restful by giving a value to set to, but that's for later me.
+@router.post("/titles/{title_id}/favourite/toggle")
+def toggle_title_favourite(title_id: int, data: dict):
+    try:
+        # Validate the session key
+        session_key = data.get("session_key")
+        user_id = validate_session_key(session_key)
+        
+        # Remove title from user's watch list
+        save_notes_query = """
+            INSERT INTO user_title_details (user_id, title_id, favourite)
+            VALUES (%s, %s, NOT favourite)
+            ON DUPLICATE KEY UPDATE favourite = NOT favourite
+        """
+        query_mysql(save_notes_query, (user_id, title_id))
+
+        return {"message": "Favourite status toggled successfully!"}
     
     except HTTPException as e:
         raise e
@@ -1188,7 +1261,110 @@ def modify_title_watch_count(data: dict):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
-@router.get("/get_title_cards")
+@router.put("/titles/{title_id}/watch_count")
+def update_title_watch_count(title_id: int, data: dict):
+    try:
+        session_key = data.get("session_key")
+        user_id = validate_session_key(session_key)
+        watch_count = data.get("watch_count")
+
+        if not isinstance(watch_count, int) or watch_count < 0:
+            raise HTTPException(status_code=400, detail="watch_count must be a non-negative integer")
+
+        title_type_result = query_mysql("SELECT type FROM titles WHERE title_id = %s", (title_id,))
+        if not title_type_result:
+            raise HTTPException(status_code=404, detail="Title not found")
+
+        title_type = title_type_result[0][0]
+
+        if title_type == "movie":
+            query = """
+                INSERT INTO user_title_details (user_id, title_id, watch_count)
+                VALUES (%s, %s, %s)
+                ON DUPLICATE KEY UPDATE watch_count = VALUES(watch_count)
+            """
+            query_mysql(query, (user_id, title_id, watch_count))
+
+        elif title_type == "tv":
+            query = """
+                INSERT INTO user_episode_details (user_id, episode_id, watch_count)
+                SELECT %s, episode_id, %s
+                FROM episodes
+                WHERE title_id = %s
+                ON DUPLICATE KEY UPDATE watch_count = VALUES(watch_count)
+            """
+            query_mysql(query, (user_id, watch_count, title_id))
+            keep_title_watch_count_up_to_date(user_id, title_id=title_id)
+
+        else:
+            raise HTTPException(status_code=400, detail="Invalid title type")
+
+        updated_data = get_updated_user_title_data(user_id, title_id)
+        return {"message": "Watch count updated!", "updated_data": updated_data}
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+
+
+@router.put("/titles/{title_id}/seasons/{season_id}/watch_count")
+def update_season_watch_count(title_id: int, season_id: int, data: dict):
+    try:
+        session_key = data.get("session_key")
+        user_id = validate_session_key(session_key)
+        watch_count = data.get("watch_count")
+
+        if not isinstance(watch_count, int) or watch_count < 0:
+            raise HTTPException(status_code=400, detail="watch_count must be a non-negative integer")
+
+        query = """
+            INSERT INTO user_episode_details (user_id, episode_id, watch_count)
+            SELECT %s, episode_id, %s
+            FROM episodes
+            WHERE season_id = %s
+            ON DUPLICATE KEY UPDATE watch_count = VALUES(watch_count)
+        """
+        query_mysql(query, (user_id, watch_count, season_id))
+        keep_title_watch_count_up_to_date(user_id, season_id=season_id)
+
+        updated_data = get_updated_user_title_data(user_id, title_id)
+        return {"message": "Season watch count updated!", "updated_data": updated_data}
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+
+
+@router.put("/titles/{title_id}/episodes/{episode_id}/watch_count")
+def update_episode_watch_count(title_id: int, season_id: int, episode_id: int, data: dict):
+    try:
+        session_key = data.get("session_key")
+        user_id = validate_session_key(session_key)
+        watch_count = data.get("watch_count")
+
+        if not isinstance(watch_count, int) or watch_count < 0:
+            raise HTTPException(status_code=400, detail="watch_count must be a non-negative integer")
+
+        query = """
+            INSERT INTO user_episode_details (user_id, episode_id, watch_count)
+            VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE watch_count = VALUES(watch_count)
+        """
+        query_mysql(query, (user_id, episode_id, watch_count))
+        keep_title_watch_count_up_to_date(user_id, episode_id=episode_id)
+
+        updated_data = get_updated_user_title_data(user_id, title_id)
+        return {"message": "Episode watch count updated!", "updated_data": updated_data}
+
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+
+
+@router.get("/titles/cards")
 def get_title_cards(
     session_key: str = Query(...),
     title_count: int = None,
@@ -1362,152 +1538,32 @@ def get_title_cards(
     return {"titles": formatted_results}
 
 
-@router.get("/list_titles")
+@router.get("/titles")
 def list_titles(
     session_key: str = Query(...),
-    offset: int = Query(default=None, gt=-1),
-    # Optional sorting
-    sort_by: str = None,
-    direction: str = None,
-    # Optional filters
-    title_type: str = Query(None, regex="^(movie|tv)$"),  
-    watched: bool = None,
-    favourite: bool = None,
-    released: bool = None,
-    started: bool = None,
-    all_titles: str = None,
-    search_term: str = None,
+    title_type: Optional[str] = None,
+    watched: Optional[bool] = None,
+    favourite: Optional[bool] = None,
+    released: Optional[bool] = None,
+    started: Optional[bool] = None,
+    all_titles: Optional[str] = None,
+    search_term: Optional[str] = None,
+    collection_id: Optional[int] = None,
+    sort_by: Optional[str] = None,
+    direction: Optional[str] = None,
+    offset: int = 0,
+    title_limit: Optional[int] = None,
 ):
     user_id = validate_session_key(session_key, False)
 
-    # Fetch title limit
-    limit_query = "SELECT list_all_titles_load_limit FROM user_settings WHERE user_id = %s"
-    limit_result = query_mysql(limit_query, (user_id,), use_dictionary=True)
-    title_limit = limit_result[0]["list_all_titles_load_limit"] if limit_result else 30
-    query_limit = title_limit + 1  
+    title_limit = fetch_user_settings(user_id, 'list_all_titles_load_limit') or 30
 
-    # Build Query
-    get_titles_query = """
-        SELECT 
-            t.title_id, 
-            t.tmdb_id,
-            t.name, 
-            t.name_original, 
-            t.tmdb_vote_average, 
-            t.tmdb_vote_count, 
-            t.movie_runtime, 
-            COALESCE(utd.watch_count, 0) AS watch_count,
-            t.type, 
-            t.release_date,
-            t.backup_poster_url,
-            t.overview,
-            (SELECT COUNT(season_id) FROM seasons WHERE title_id = t.title_id) AS season_count,
-            (SELECT COUNT(episode_id) FROM episodes WHERE title_id = t.title_id) AS episode_count,
-            utd.favourite,
-            utd.last_updated,
-            EXISTS (
-                SELECT 1
-                FROM episodes e
-                LEFT JOIN user_episode_details ued
-                    ON ued.episode_id = e.episode_id
-                    AND ued.user_id = utd.user_id
-                WHERE e.title_id = t.title_id
-                    AND e.air_date <= CURDATE()
-                    AND e.air_date >= DATE_SUB(CURDATE(), INTERVAL 14 DAY)
-                    AND COALESCE(ued.watch_count, 0) != 1
-                LIMIT 1
-            ) AS new_episodes,
-            CASE 
-                WHEN utd.title_id IS NOT NULL THEN TRUE
-                ELSE FALSE
-            END AS is_in_watchlist,
-            GROUP_CONCAT(DISTINCT g.genre_name ORDER BY g.genre_name ASC SEPARATOR ', ') AS genres
-        FROM 
-            titles t
-        LEFT JOIN 
-            user_title_details utd ON utd.title_id = t.title_id AND utd.user_id = %s
-        LEFT JOIN 
-            title_genres tg ON tg.title_id = t.title_id
-        LEFT JOIN 
-            genres g ON tg.genre_id = g.genre_id
-        WHERE 
-            1=1
-    """
-    
-    query_params = [user_id]
+    query, query_params = build_titles_query(
+        user_id, title_type, watched, favourite, released, started, all_titles, 
+        search_term, collection_id, sort_by, direction, offset, title_limit
+    )
 
-    if all_titles == "all_titles":
-        pass
-    elif all_titles == "not_added":
-        get_titles_query += " AND (utd.user_id != %s OR utd.user_id IS NULL)"
-        query_params.append(user_id)
-    else:
-        get_titles_query += " AND utd.user_id = %s"
-        query_params.append(user_id)
-
-    if title_type:
-        get_titles_query += " AND t.type = %s"
-        query_params.append(title_type.lower())
-
-    if watched is True:
-        get_titles_query += " AND utd.watch_count >= 1"
-    elif watched is False:
-        get_titles_query += " AND (utd.watch_count <= 0 OR utd.watch_count IS NULL)"
-
-    if favourite is True:
-        get_titles_query += " AND utd.favourite = TRUE"
-    elif favourite is False:
-        get_titles_query += " AND utd.favourite = FALSE"
-
-    if released is True:
-        get_titles_query += " AND t.release_date <= CURDATE()"
-    elif released is False:
-        get_titles_query += " AND t.release_date > CURDATE()"
-
-    if started is True:
-        get_titles_query += """
-            AND EXISTS (
-                SELECT 1 
-                FROM user_episode_details ued 
-                JOIN episodes e ON ued.episode_id = e.episode_id 
-                WHERE ued.user_id = utd.user_id 
-                AND e.title_id = t.title_id 
-                AND ued.watch_count > 0
-                LIMIT 1
-            )
-        """
-    elif started is False:
-        get_titles_query += """
-            AND NOT EXISTS (
-                SELECT 1 
-                FROM user_episode_details ued 
-                JOIN episodes e ON ued.episode_id = e.episode_id 
-                WHERE ued.user_id = utd.user_id 
-                AND e.title_id = t.title_id 
-                AND ued.watch_count > 0
-                LIMIT 1
-            )
-        """
-
-    if search_term:
-        get_titles_query += " AND t.name LIKE %s"
-        query_params.append(f"%{search_term}%")
-
-    get_titles_query += " GROUP BY t.title_id"
-
-    direction = direction.upper() if direction else "DESC"
-
-    if sort_by == "release_date":
-        get_titles_query += f" ORDER BY t.release_date {direction}"
-    elif sort_by == "latest_updated":
-        get_titles_query += f" ORDER BY utd.last_updated {direction}"
-    else:
-        get_titles_query += f" ORDER BY t.tmdb_vote_average {direction}"
-
-    get_titles_query += " LIMIT %s OFFSET %s"
-    query_params.extend([query_limit, offset * title_limit])
-
-    results = query_mysql(get_titles_query, tuple(query_params), use_dictionary=True)
+    results = query_mysql(query, tuple(query_params), use_dictionary=True)
 
     has_more = len(results) > title_limit
     results = results[:title_limit]
@@ -1522,44 +1578,10 @@ def list_titles(
     }
 
 
-def get_backdrop_count(title_id: int):
-    # Path base
-    base_path = "/fastapi-media/title"
-    
-    # Count of backdrops that exist
-    count = 0
-
-    # Loop through the backdrops from 1 to 5
-    for i in range(1, 6):
-        image_path = os.path.join(base_path, str(title_id), f"backdrop{i}.jpg")
-        
-        # Check if the image exists
-        if os.path.exists(image_path):
-            count += 1
-
-    return count
-
-
-def get_logo_type(title_id: int):
-    # Base path
-    base_path = "/fastapi-media/title"
-    
-    # Possible logo types/extensions to check
-    logo_types = ["png", "svg", "jpg", "jpeg", "webp"]
-
-    # Check for each type
-    for logo_type in logo_types:
-        logo_path = os.path.join(base_path, str(title_id), f"logo.{logo_type}")
-        if os.path.exists(logo_path):
-            return logo_type  # Return the first found type
-
-    return None  # Return None if no logo exists
-
-
-@router.get("/get_title_info")
+@router.get("/titles/{title_id}")
 def get_title_info(
+    title_id: int,
     session_key: str = Query(...),
-    title_id: int = Query(...),
 ):
     # Get user_id and validate session key
     user_id = validate_session_key(session_key, False)
@@ -1655,10 +1677,39 @@ def get_title_info(
 
     return {"title_info": title_info}
 
+
+@router.get("/titles/{title_id}/collections")
+def list_collections(
+    title_id: str,
+    session_key: str = Query(...),
+):
+    user_id = validate_session_key(session_key)
+
+    # Get collections
+    query = """
+        SELECT
+            uc.collection_id,
+            uc.name,
+            uc.description,
+            CASE
+                WHEN ct.title_id IS NOT NULL THEN TRUE
+                ELSE FALSE
+            END AS title_in_collection
+        FROM user_collection uc
+        LEFT JOIN collection_title ct
+            ON uc.collection_id = ct.collection_id AND ct.title_id = %s
+        WHERE uc.user_id = %s
+        ORDER BY title_in_collection DESC, uc.name ASC
+    """
+    collections = query_mysql(query, (title_id, user_id), use_dictionary=True)
+
+    return collections
+
+
 # ------------ Collections ------------
 
-@router.post("/collection/create")
-def add_title_to_collection(data: dict):
+@router.post("/collections")
+def create_collection(data: dict):
     session_key = data.get("session_key")
     user_id = validate_session_key(session_key)
 
@@ -1672,24 +1723,25 @@ def add_title_to_collection(data: dict):
         INSERT INTO user_collection (user_id, name, description)
         VALUES (%s, %s, %s)
     """
-    query_mysql(query, (user_id, name, description))
+    collection_id = query_mysql(query, (user_id, name, description), fetch_last_row_id=True)
 
     return {
-        "message": "Collection created successfully!"
+        "message": "Collection created successfully!",
+        "collection": {
+            'collection_id': collection_id,
+            'name': name, 
+            'description': description
+        }
     }
 
 
-@router.post("/collection/edit")
-def edit_collection(data: dict):
+@router.put("/collections/{collection_id}")
+def edit_collection(collection_id: int, data: dict):
     session_key = data.get("session_key")
     user_id = validate_session_key(session_key)
 
-    collection_id = data.get("collection_id")
     name = data.get("name")
     description = data.get("description")
-
-    if not collection_id:
-        raise HTTPException(status_code=400, detail="Missing parameter: collection_id")
 
     fields = []
     values = []
@@ -1717,16 +1769,13 @@ def edit_collection(data: dict):
     }
 
 
-@router.delete("/collection/delete")
-def delete_collection(data: dict):
+@router.delete("/collections/{collection_id}")
+def delete_collection(collection_id: int, data: dict):
     session_key = data.get("session_key")
     user_id = validate_session_key(session_key)
 
-    collection_id = data.get("collection_id")
+    check_collection_ownership(collection_id, user_id)
 
-    if not collection_id:
-        raise HTTPException(status_code=400, detail="Missing parameter: collection_id")
-    
     query = """
         DELETE FROM user_collection 
         WHERE user_id = %s AND collection_id = %s
@@ -1738,60 +1787,66 @@ def delete_collection(data: dict):
     }
 
 
-def list_collections(
-    session_key: str = Query(...),
-):
+@router.get("/collections")
+def list_collections(session_key: str = Query(...)):
     user_id = validate_session_key(session_key)
 
-    # Apparently mysql cannot return the data formatted correctly, but can get it all in one query, so we will use that since it's most efficient?
+    # Get collections
     query = """
-        SELECT 
-            uc.collection_id,
-            uc.name AS collection_name,
-            uc.description,
-            t.title_id,
-            t.name AS title_name
-        FROM user_collection uc
-        LEFT JOIN collection_title ct ON uc.collection_id = ct.collection_id
-        LEFT JOIN titles t ON ct.title_id = t.title_id
-        WHERE uc.user_id = %s
-        ORDER BY uc.collection_id
+        SELECT
+            collection_id,
+            name,
+            description
+        FROM user_collection
+        WHERE user_id = %s
+        ORDER BY name
     """
-    rows = query_mysql(query, (user_id,), use_dictionary=True)
+    collections = query_mysql(query, (user_id,), use_dictionary=True)
 
-    collections = {}
-    for row in rows:
-        cid = row["collection_id"]
-        if cid not in collections:
-            collections[cid] = {
-                "collection_id": cid,
-                "name": row["collection_name"],
-                "description": row["description"],
-                "titles": []
-            }
-        if row["title_id"]:
-            collections[cid]["titles"].append({
-                "title_id": row["title_id"],
-                "name": row["title_name"]
-            })
+    # Fetch titles for each collection
+    for collection in collections:
+        # Apply filters and sorting based on collection ID
+        filters = {
+            'collection_id': collection['collection_id']
+        }
+        sort = {
+            'sort_by': 'latest_updated'
+        }
 
-    return list(collections.values())
+        query, query_params = build_titles_query(
+            user_id, 
+            title_type=None, 
+            watched=None, 
+            favourite=None, 
+            released=None, 
+            started=None, 
+            all_titles=None, 
+            search_term=None, 
+            collection_id=collection['collection_id'], 
+            sort_by='latest_updated', 
+            direction='DESC', 
+            offset=0, 
+            title_limit=None
+        )
+
+        titles = query_mysql(query, tuple(query_params), use_dictionary=True)
+
+        # Process genres for each title
+        for row in titles:
+            row["genres"] = row["genres"].split(", ") if row["genres"] else []
+
+        collection['titles'] = titles
+
+    return collections
 
 
+@router.put("/collections/{collection_id}/title/{title_id}")
+def add_title_to_collection(collection_id: int, title_id: int, data: dict):
 
-@router.post("/collection/add_title")
-def add_title_to_collection(data: dict):
-    session_key = data.get("session_key")
-    validate_session_key(session_key)
+    user_id = validate_session_key(data.get("session_key"))
 
-    title_id = data.get("title_id")
-    collection_id = data.get("collection_id")
+    check_collection_ownership(collection_id, user_id)
 
-    if (not title_id):
-        raise HTTPException(status_code=400, detail=f"Missing parameter: title_id")
-    if (not collection_id):
-        raise HTTPException(status_code=400, detail=f"Missing parameter: collection_id")
-    
     query = """
         INSERT INTO collection_title (collection_id, title_id)
         VALUES (%s, %s)
@@ -1803,19 +1858,13 @@ def add_title_to_collection(data: dict):
     }
 
 
-@router.delete("/collection/remove_title")
-def remove_title_from_collection(data: dict):
-    session_key = data.get("session_key")
-    validate_session_key(session_key)
+@router.delete("/collections/{collection_id}/title/{title_id}")
+def remove_title_from_collection(collection_id: int, title_id: int, data: dict):
 
-    title_id = data.get("title_id")
-    collection_id = data.get("collection_id")
+    user_id = validate_session_key(data.get("session_key"))
 
-    if (not title_id):
-        raise HTTPException(status_code=400, detail=f"Missing parameter: title_id")
-    if (not collection_id):
-        raise HTTPException(status_code=400, detail=f"Missing parameter: collection_id")
-    
+    check_collection_ownership(collection_id, user_id)
+
     query = """
         DELETE FROM collection_title 
         WHERE collection_id = %s AND title_id = %s
