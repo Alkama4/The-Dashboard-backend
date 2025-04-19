@@ -13,34 +13,30 @@ from routers.watch_list import router as watch_list_router
 from utils import query_mysql
 
 # Create fastAPI instance and set CORS middleware
-# Could limit to only my local addresses but works fine as is.
+# Could limit the addresses but works fine as is, since only hosted on LAN.
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],      # List of allowed origins
-    allow_methods=["*"],      # Allow all HTTP methods (GET, POST, etc.)
-    allow_headers=["*"],      # Allow all headers
+    allow_methods=["*"],      # List of allowed HTTP methods (GET, POST, etc.)
+    allow_headers=["*"],      # List of allowed headers
 )
 
 # Include the account routes in the FastAPI app
 app.include_router(account_router, prefix="/account", tags=["account"])
 app.include_router(media_router, prefix="/media", tags=["media"])
-app.include_router(redirect_router, prefix="/redirect", tags=["redirect"])
+app.include_router(redirect_router, prefix="/redirect", tags=["redirect"])  # TODO: Implement or figure better alternative
 app.include_router(server_router, prefix="/server", tags=["server"])
 app.include_router(spendings_router, prefix="/spendings", tags=["spendings"])
 app.include_router(watch_list_router, prefix="/watch_list", tags=["watch_list"])
 
-# - - - - - - - - - - - - - - - - - - - - #
-# - - - - - - - BASIC TOOLS - - - - - - - #
-# - - - - - - - - - - - - - - - - - - - - #
 
-# Runs everytime an endpoint is called
-# Used to log request for analysis
+# Runs everytime an endpoint is called. Used to log request for analysis.
 @app.middleware("http")
 async def log_request_data(request: Request, call_next):
 
     # Skip if the automated server log call
-    if request.url.path == "/store_server_resource_logs":
+    if request.url.path == "/server/logs/system_resources":
         return await call_next(request)
 
     # Get values for the log
@@ -62,7 +58,7 @@ async def log_request_data(request: Request, call_next):
     return response
 
 
-# Landing page that shows dynamically generated endpoints
+# Landing page that dynamically shows endpoints
 @app.get("/")
 def root(request: Request):
     # Dynamically generate a list of all available endpoints

@@ -14,6 +14,7 @@ from utils import query_mysql, validate_session_key
 router = APIRouter()
 
 
+# ------------ Transactions ------------
 
 @router.get("/transactions")
 def get_transactions(
@@ -342,8 +343,6 @@ def delete_transaction(transaction_id: int, data: dict):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
-
-
 @router.get("/transactions/options/categories")
 def get_options(
     session_key: str = Query(None)
@@ -472,7 +471,7 @@ def get_filters(
         return {"error": str(e)}
 
 
-
+# ------------ Analytics ------------
 
 @router.get("/analytics/stats/general")
 def analytics_get_general_stats(
@@ -521,8 +520,8 @@ def analytics_get_general_stats(
 
 @router.get("/analytics/stats/{timespan}")
 def analytics_get_last_timespan_stats(
+    timespan: str,
     session_key: str = Query(None),
-    timespan: str = Query(..., regex="^(month|year)$"),
 ):
     try:
         # Validate the session key
@@ -554,6 +553,9 @@ def analytics_get_last_timespan_stats(
             # Fixed
             months_in_period = 12
             date_condition = "t.date >= DATE_SUB(CURDATE(), INTERVAL 1 YEAR)"
+        
+        else:
+            raise HTTPException(status_code=400, detail="Missing or invalid timespan.")
 
         # print("Days in period: ")
         # print(days_in_period)
@@ -686,8 +688,6 @@ def analytics_get_last_timespan_stats(
         raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-
 
 
 @router.get("/analytics/charts/{chart_type}")

@@ -11,13 +11,14 @@ from utils import query_mysql, validate_session_key
 router = APIRouter()
 
 @router.post("/login")
-def login(
-    username: str = Query(...),
-    password: str = Query(...),
-    previousSessionKey: str = Query(None)
-):
+def login(data: dict):
+
+    username = data.get('username')
+    password = data.get('password')
+    previous_session_key = data.get('previous_session_key')
+
     # Check if the user is already logged in
-    if previousSessionKey:
+    if previous_session_key:
         # Check if the session key exists and join it with the user table to get the username
         query = """
             SELECT username 
@@ -28,14 +29,14 @@ def login(
                 WHERE session_id = %s AND expires_at > NOW()
             );
         """
-        result = query_mysql(query, (previousSessionKey,))
+        result = query_mysql(query, (previous_session_key,))
         if result:
             logged_in_username = result[0][0]  # Extract the username from the query result
             if logged_in_username.lower() == username.lower():
                 return {
                     "loginStatus": "warning", 
                     "statusMessage": "Already logged in.",
-                    "sessionKey": previousSessionKey, 
+                    "sessionKey": previous_session_key, 
                 }
 
     # Check if the user exists in the database and query the password
@@ -77,40 +78,16 @@ def login(
     }
 
 
-@router.get("/login_status")
-def get_login_status(
-    session_key: str = Query(...)
-):
-    # Check if the session key exists and join it with the user table to get the username
-    query = """
-    SELECT username 
-    FROM users 
-    WHERE user_id = (
-        SELECT user_id 
-        FROM sessions 
-        WHERE session_id = %s AND expires_at > NOW()
-    );
-    """
-    result = query_mysql(query, (session_key,))
-    if result:
-        return {
-            "loggedIn": True, 
-            "username": result[0][0],
-        }
-    
-    else:
-        return {
-            "loggedIn": False,
-        }
-    
-
 @router.post("/logout")
-def logout(
-    sessionKey: str = Query(...)
-):
+def logout(data: dict):
+
+    session_key = data.get("session_key")
+    if not session_key:
+        raise HTTPException(status_code=400, detail="Missing parameter: session_key.")
+
     # Delete the session key from the sessions table
     query = "DELETE FROM sessions WHERE session_id = %s"
-    query_mysql(query, (sessionKey,))
+    query_mysql(query, (session_key,))
     return {
         "logOutSuccess": True,
     }
@@ -165,6 +142,37 @@ def create_account(data: dict):
     
     else:
         raise HTTPException(status_code=400, detail="Missing username or password.")
+
+
+# Used to be get login status
+@router.get("/session")
+def get_session_details(
+    session_key: str = Query(...)
+):
+    # Check if the session key exists and join it with
+    # the user table to get the username.
+    query = """
+    SELECT username 
+    FROM users 
+    WHERE user_id = (
+        SELECT user_id 
+        FROM sessions 
+        WHERE session_id = %s AND expires_at > NOW()
+    );
+    """
+    result = query_mysql(query, (session_key,))
+
+    if result:
+        return {
+            "active": True, 
+            "username": result[0][0],
+        }
+
+    else:
+        return {
+            "active": False,
+            "username": None,
+        }
 
 
 # The password should be asked twice etc on the front end,
@@ -228,7 +236,7 @@ def change_password(data: dict):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
-# Valid settings so that adding more is simpler
+# List here to make adding and modifying process simpler and more unified
 VALID_SETTINGS = [
     "transactions_load_limit",
     "chart_balance_initial_value",
@@ -257,16 +265,16 @@ def update_settings(data: dict):
     session_key = data.get("session_key")
     user_id = validate_session_key(session_key, True)
 
-    changed_settings = data.get("changed_settings")
+    updated_settings = data.get("updated_settings")
 
-    if not changed_settings:
+    if not updated_settings:
         return {"message": "No settings to update"}
 
     # Prepare the SET clause and values for the update query
     set_clause = []
     values = []
 
-    for setting in changed_settings:
+    for setting in updated_settings:
         setting_name = setting["setting"]
         value = setting["value"]
         
