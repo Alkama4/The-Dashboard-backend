@@ -2,6 +2,8 @@
 import time
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from datetime import datetime, timezone
+import json
 
 # Internal imports
 from routers.account import router as account_router 
@@ -10,7 +12,7 @@ from routers.redirect import router as redirect_router
 from routers.server import router as server_router 
 from routers.spendings import router as spendings_router 
 from routers.watch_list import router as watch_list_router 
-from utils import query_mysql
+from utils import redis_client
 
 # Create fastAPI instance and set CORS middleware
 # Could limit the addresses but works fine as is, since only hosted on LAN.
@@ -35,26 +37,26 @@ app.include_router(watch_list_router, prefix="/watch_list", tags=["watch_list"])
 # Runs everytime an endpoint is called. Used to log request for analysis.
 @app.middleware("http")
 async def log_request_data(request: Request, call_next):
-
-    # Skip if the automated server log call
     if request.url.path == "/server/logs/system_resources":
         return await call_next(request)
 
-    # Get values for the log
     start_time = time.time()
     response = await call_next(request)
     process_time = time.time() - start_time
-    endpoint = request.url.path
-    status_code = response.status_code
-    client_ip = request.client.host
-    method = request.method
 
-    # Push the data to mysql
-    insert_query = """
-    INSERT INTO server_fastapi_request_logs (endpoint, status_code, backend_time_ms, client_ip, method)
-    VALUES (%s, %s, %s, %s, %s)
-    """
-    query_mysql(insert_query, (endpoint, status_code, process_time * 1000, client_ip, method))
+    log_entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "endpoint": request.url.path,
+        "status_code": response.status_code,
+        "backend_time_ms": round(process_time * 1000, 2),
+        "client_ip": request.client.host,
+        "method": request.method
+    }
+
+    MAX_LOGS_AMOUNT = 10000
+
+    await redis_client.lpush("fastapi_request_logs", json.dumps(log_entry))
+    await redis_client.ltrim("fastapi_request_logs", 0, MAX_LOGS_AMOUNT - 1)
 
     return response
 

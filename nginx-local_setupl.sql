@@ -1,4 +1,5 @@
--- This .sql file is a file that is kept up to date with the current databases setup. It can be used to set the DB up or to understand the structure. If you do ANY CHANGES to the database also add them here.
+-- This .sql file maintains the current database setup. It can be used to initialize the DB or to understand its structure. Any changes to the database should be reflected here as well.
+
 
 --------------- USER MANAGEMENT ---------------
 DROP TABLE IF EXISTS users;
@@ -199,40 +200,13 @@ CREATE TABLE IF NOT EXISTS collection_title (
 );
 
 
-
---------------- SERVER LOGS ---------------
-DROP TABLE IF EXISTS server_resource_logs;
-CREATE TABLE server_resource_logs (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    cpu_temperature FLOAT,
-    ram_usage FLOAT,
-    cpu_usage FLOAT,
-    system_load FLOAT,
-    network_sent_bytes BIGINT,
-    network_recv_bytes BIGINT,
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-
-DROP TABLE IF EXISTS server_fastapi_request_logs;
-CREATE TABLE server_fastapi_request_logs (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    endpoint VARCHAR(255),
-    status_code INT,
-    backend_time_ms FLOAT,
-    client_ip VARCHAR(45),
-    method VARCHAR(10),
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-
 --------------- INDEXES ---------------
 
 -- Just ran this and left it be
 CREATE INDEX idx_user_id ON transactions(user_id, date);
 
 
--- Decided to not mess with these for now but here they are
+-- Decided to not mess with these for now, but here are some that I messed with
 DROP INDEX idx_user_id ON transactions;
 
 SHOW INDEX FROM transactions;

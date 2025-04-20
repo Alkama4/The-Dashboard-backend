@@ -1043,7 +1043,7 @@ async def add_user_title(data: dict):
                 if title_type == "movie":
                     title_id = await add_or_update_movie_title(tmdb_id)
                 else:
-                    title_id = await add_or_update_tv_title(tmdb_id)
+                    title_id = await add_or_update_tv_title(tmdb_id, update_title_info=True, update_season_info=True, update_season_number=0)
 
         if not title_id:
             raise HTTPException(status_code=400, detail="Missing or invalid title_id/tmdb_id")

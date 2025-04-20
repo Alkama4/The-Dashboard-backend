@@ -1,11 +1,12 @@
 # External imports
 from collections import defaultdict
-from datetime import timedelta, datetime
+from datetime import timedelta, datetime, timezone
+import json
 import psutil
 from fastapi import HTTPException, Query, APIRouter
 
 # Internal imports
-from utils import query_mysql, format_time_difference
+from utils import query_mysql, format_time_difference, redis_client
 
 # Create the router object for this module
 router = APIRouter()
@@ -38,191 +39,168 @@ def get_server_drives_info():
 
 
 @router.get("/logs/system_resources")
-def get_server_resource_logs(timeframe: str = Query(None)):
+async def get_server_resource_logs(timeframe: str = Query(None)):
     try:
-        # Build the WHERE clause based on the timeframe
         timeframe_switch = {
-            "24h": "24 HOUR",
-            "12h": "12 HOUR",
-            "6h": "6 HOUR",
-            "3h": "3 HOUR",
-            "1h": "1 HOUR",
-            "30m": "30 MINUTE",
-            "15m": "15 MINUTE"
+            "24h": 86400,
+            "12h": 43200,
+            "6h": 21600,
+            "3h": 10800,
+            "1h": 3600,
+            "30m": 1800,
+            "15m": 900
         }
-        if timeframe in timeframe_switch:
-            where_clause = f"timestamp >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL {timeframe_switch[timeframe]})"
-        else:
+
+        if timeframe not in timeframe_switch:
             raise HTTPException(status_code=400, detail="Invalid timeframe")
 
-        # SQL query with dynamic WHERE clause
-        server_data_query = f"""
-            SELECT 
-                cpu_temperature,
-                cpu_usage,
-                ram_usage,
-                system_load,
-                network_sent_bytes,
-                network_recv_bytes,
-                timestamp
-            FROM server_resource_logs
-            WHERE {where_clause}
-        """
-        
-        # Execute the query and fetch the result
-        server_data_result = query_mysql(server_data_query, ())
+        seconds_limit = timeframe_switch[timeframe]
+        now = datetime.now(timezone.utc)  # This gives a timezone-aware datetime in UTC
 
-        # Format the results and normalize timestamps to 10-second precision
-        formatted_data = []
-        for result in server_data_result:
-            formatted_data.append({
-                "cpu_temperature": result[0],
-                "cpu_usage": result[1],
-                "ram_usage": result[2],
-                "system_load": result[3],
-                "network_sent_bytes": result[4],
-                "network_recv_bytes": result[5],
-                # Normalize timestamp to the nearest 10 seconds downwards
-                "timestamp": result[6].replace(second=(result[6].second // 10) * 10, microsecond=0)
-            })
-        
-        # Get the first and last timestamps from the result
-        if formatted_data:
-            start_time = formatted_data[0]['timestamp']
-            end_time = formatted_data[-1]['timestamp']
-        else:
+        logs = await redis_client.lrange("system_resource_logs", 0, -1)
+        parsed_logs = [json.loads(log) for log in logs]
+
+        # Filter and normalize timestamps
+        filtered_logs = []
+        for entry in parsed_logs:
+            ts = datetime.fromisoformat(entry["timestamp"])  # Assuming it's naive initially
+            ts = ts.replace(tzinfo=timezone.utc)  # Convert to timezone-aware (UTC)
+
+            if (now - ts).total_seconds() <= seconds_limit:
+                # Normalize timestamp to nearest 5 seconds
+                entry["timestamp"] = ts.replace(second=(ts.second // 5) * 5, microsecond=0)
+                filtered_logs.append(entry)
+
+        # Sort by timestamp ascending
+        filtered_logs.sort(key=lambda x: x["timestamp"])
+
+        if not filtered_logs:
             return {"data": []}
 
-        # Generate the full range of timestamps in 10-second intervals from start to end
+        start_time = filtered_logs[0]["timestamp"]
+        end_time = filtered_logs[-1]["timestamp"]
         current_time = start_time
         complete_data = []
-        
+
         while current_time <= end_time:
-            # Check if we have a log entry for the current timestamp
-            matching_data = next((data for data in formatted_data if data['timestamp'] == current_time), None)
-            
-            if matching_data:
-                complete_data.append(matching_data)
+            match = next((item for item in filtered_logs if item["timestamp"] == current_time), None)
+            if match:
+                complete_data.append(match)
             else:
-                # If no entry exists, append an entry with zero values
                 complete_data.append({
                     "cpu_temperature": 0,
                     "cpu_usage": 0,
                     "ram_usage": 0,
-                    "system_load": 0,
-                    "network_sent_bytes": complete_data[-1]["network_sent_bytes"],
-                    "network_recv_bytes": complete_data[-1]["network_recv_bytes"],
+                    "cpu_clock_mhz": 0,
+                    "uptime_seconds": 0,
+                    "network_sent_bytes": complete_data[-1]["network_sent_bytes"] if complete_data else 0,
+                    "network_recv_bytes": complete_data[-1]["network_recv_bytes"] if complete_data else 0,
                     "timestamp": current_time
                 })
-            
-            # Move to the next 10-second interval
-            current_time += timedelta(seconds=10)
-        
+            current_time += timedelta(seconds=5)  # Step forward in 5-second increments
+
         return {"data": complete_data}
-    
+
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/logs/system_resources")
-def store_server_resource_logs(data: dict):
+async def store_server_resource_logs(data: dict):
     try:
-        # Insert the new log entry
-        store_data_query = """
-            INSERT INTO server_resource_logs (
-                cpu_temperature,
-                cpu_usage,
-                ram_usage,
-                system_load,
-                network_sent_bytes,
-                network_recv_bytes
-            ) 
-            VALUES (%s, %s, %s, %s, %s, %s);
-        """
-        store_data_params = (
-            data["cpu_temperature"],
-            data["cpu_usage"],
-            data["ram_usage"],
-            data["system_load"],
-            data["network_sent_bytes"],
-            data["network_recv_bytes"],
-        )
-        query_mysql(store_data_query, store_data_params)
+        log_entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            **data
+        }
+
+        # One log every 5 seconds
+        # 24 * 60 * 12 = 17280
+        MAX_LOGS_AMOUNT = 17280
+
+        await redis_client.lpush("system_resource_logs", json.dumps(log_entry))
+        await redis_client.ltrim("system_resource_logs", 0, MAX_LOGS_AMOUNT - 1)
 
         return {"message": "Success"}
 
     except Exception as e:
         print(e)
         return {"error": str(e)}
-    
+
 
 @router.get("/logs/fastapi")
-def get_fastapi_request_data(timeframe: str = Query(None)):
+async def get_fastapi_request_data(timeframe: str = Query(None)):
     try:
-        # Validate timeframe
-        interval_map = {"24h": "24 HOUR", "7d": "7 DAY", "30d": "30 DAY"}
+        # Validate and map timeframe to seconds
+        interval_map = {"24h": 86400, "7d": 604800, "30d": 2592000}
         if timeframe not in interval_map:
             raise HTTPException(status_code=400, detail="Invalid timeframe")
-        interval = interval_map[timeframe]
 
-        # Fetch logs from the database
-        query = f"""
-            SELECT status_code, method, endpoint, client_ip, backend_time_ms, UNIX_TIMESTAMP(timestamp) DIV 60 AS minute_bucket
-            FROM server_fastapi_request_logs
-            WHERE timestamp >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL {interval})
-        """
-        results = query_mysql(query, ())
+        now = datetime.now(timezone.utc)
 
-        # Initialize data structures
+        # Fetch and parse logs from Redis
+        logs = await redis_client.lrange("fastapi_request_logs", 0, -1)
+        parsed_logs = [json.loads(log) for log in logs]
+
+        # Filter logs based on timeframe and calculate minute bucket
+        filtered = []
+        for log in parsed_logs:
+            ts = datetime.fromisoformat(log["timestamp"])
+            if (now - ts).total_seconds() <= interval_map[timeframe]:
+                log["minute_bucket"] = int(ts.timestamp()) // 60
+                filtered.append(log)
+
+        # Initialize aggregation structures
         status_count = defaultdict(int)
         method_count = defaultdict(int)
         endpoint_count = defaultdict(int)
         client_ip_count = defaultdict(int)
         minute_buckets = defaultdict(int)
-        backend_times = []
         endpoint_times = defaultdict(lambda: {"total_time": 0, "count": 0})
-
-        # Track error codes per endpoint (for 400s and 500s)
         endpoint_error_codes = defaultdict(lambda: defaultdict(int))
 
+        backend_times = []
         total_requests = 0
         total_backend_time = 0
 
-        # Process logs
-        for row in results:
-            status_code, method, endpoint, client_ip, backend_time_ms, minute_bucket = row
-            if endpoint == "/store_server_resource_logs":
-                continue  # Skip this endpoint
+        # Process filtered logs and build stats
+        for log in filtered:
+            if log["endpoint"] == "/store_server_resource_logs":
+                continue
 
-            status_count[status_code] += 1
+            code = log["status_code"]
+            method = log["method"]
+            endpoint = log["endpoint"]
+            ip = log["client_ip"]
+            time_ms = log["backend_time_ms"]
+            bucket = log["minute_bucket"]
+
+            status_count[code] += 1
             method_count[method] += 1
             endpoint_count[endpoint] += 1
-            client_ip_count[client_ip] += 1
-            minute_buckets[minute_bucket] += 1
+            client_ip_count[ip] += 1
+            minute_buckets[bucket] += 1
 
             total_requests += 1
-            total_backend_time += backend_time_ms or 0
+            total_backend_time += time_ms
+            backend_times.append(time_ms)
 
-            if backend_time_ms is not None:
-                backend_times.append(backend_time_ms)
-                endpoint_times[endpoint]["total_time"] += backend_time_ms
-                endpoint_times[endpoint]["count"] += 1
+            endpoint_times[endpoint]["total_time"] += time_ms
+            endpoint_times[endpoint]["count"] += 1
 
-            # Track error codes for endpoints (400s and 500s)
-            if 400 <= status_code < 600:
-                endpoint_error_codes[endpoint][status_code] += 1
+            if 400 <= code < 600:
+                endpoint_error_codes[endpoint][code] += 1
 
-        # Calculate backend time histogram
+        # Build backend response time histogram (bucketed)
         bucket_size = 100
         max_bucket = 1000
         buckets = [(i * bucket_size, (i + 1) * bucket_size) for i in range(max_bucket // bucket_size)]
         buckets.append((max_bucket, 600000))
 
         histogram = defaultdict(int)
-        for time in backend_times:
+        for t in backend_times:
             for i, (start, end) in enumerate(buckets):
-                if start <= time < end:
+                if start <= t < end:
                     histogram[i] += 1
                     break
 
@@ -234,8 +212,7 @@ def get_fastapi_request_data(timeframe: str = Query(None)):
             for i, (start, end) in enumerate(buckets)
         ]
 
-
-        # Fill missing minute buckets
+        # Fill in missing time buckets for graphing request volume over time
         min_bucket = min(minute_buckets.keys(), default=0)
         max_bucket = max(minute_buckets.keys(), default=0)
         filled_minute_buckets = [
@@ -243,19 +220,22 @@ def get_fastapi_request_data(timeframe: str = Query(None)):
             for minute in range(min_bucket, max_bucket + 1)
         ]
 
-        # Calculate average backend time
+        # Calculate average backend processing time
         avg_backend_time = total_backend_time / total_requests if total_requests else 0
 
-        # Prepare endpoint error summary
-        endpoint_error_summary = []
-        for endpoint, codes in endpoint_error_codes.items():
-            error_counts = [{"status_code": code, "count": count} for code, count in codes.items()]
-            endpoint_error_summary.append({
+        # Prepare error stats per endpoint
+        endpoint_error_summary = [
+            {
                 "endpoint": endpoint,
-                "errors": sorted(error_counts, key=lambda x: x['count'], reverse=True)
-            })
+                "errors": sorted(
+                    [{"status_code": code, "count": count} for code, count in codes.items()],
+                    key=lambda x: x["count"], reverse=True
+                )
+            }
+            for endpoint, codes in endpoint_error_codes.items()
+        ]
 
-        # Prepare response data
+        # Final response payload with all the aggregated data
         return {
             "data": {
                 "total_requests": total_requests,
@@ -278,8 +258,7 @@ def get_fastapi_request_data(timeframe: str = Query(None)):
                             "endpoint": endpoint,
                             "count": count,
                             "avg_response_time_ms": round(endpoint_times[endpoint]["total_time"] / endpoint_times[endpoint]["count"])
-                            if endpoint in endpoint_times and endpoint_times[endpoint]["count"] > 0
-                            else 0
+                            if endpoint_times[endpoint]["count"] > 0 else 0
                         }
                         for endpoint, count in endpoint_count.items()
                     ],
