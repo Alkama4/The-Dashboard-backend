@@ -41,6 +41,8 @@ def get_server_drives_info():
 @router.get("/logs/system_resources")
 async def get_server_resource_logs(timeframe: str = Query(None)):
     try:
+        TIMESPAN_SECONDS = 10
+
         timeframe_switch = {
             "24h": 86400,
             "12h": 43200,
@@ -54,52 +56,50 @@ async def get_server_resource_logs(timeframe: str = Query(None)):
         if timeframe not in timeframe_switch:
             raise HTTPException(status_code=400, detail="Invalid timeframe")
 
-        seconds_limit = timeframe_switch[timeframe]
-        now = datetime.now(timezone.utc)  # This gives a timezone-aware datetime in UTC
+        now_ts = datetime.now(timezone.utc).timestamp()
+        start_ts = now_ts - timeframe_switch[timeframe]
 
-        logs = await redis_client.lrange("system_resource_logs", 0, -1)
-        parsed_logs = [json.loads(log) for log in logs]
+        raw_logs = await redis_client.zrangebyscore(
+            "system_resource_logs_zset",
+            min=start_ts,
+            max=now_ts
+        )
 
-        # Filter and normalize timestamps
-        filtered_logs = []
-        for entry in parsed_logs:
-            ts = datetime.fromisoformat(entry["timestamp"])  # Assuming it's naive initially
-            ts = ts.replace(tzinfo=timezone.utc)  # Convert to timezone-aware (UTC)
+        parsed_logs = []
+        for raw in raw_logs:
+            entry = json.loads(raw)
+            ts = datetime.fromisoformat(entry["timestamp"]).replace(tzinfo=timezone.utc)
+            entry["timestamp"] = ts.replace(second=(ts.second // TIMESPAN_SECONDS) * TIMESPAN_SECONDS, microsecond=0)
+            parsed_logs.append(entry)
 
-            if (now - ts).total_seconds() <= seconds_limit:
-                # Normalize timestamp to nearest 5 seconds
-                entry["timestamp"] = ts.replace(second=(ts.second // 5) * 5, microsecond=0)
-                filtered_logs.append(entry)
+        parsed_logs.sort(key=lambda x: x["timestamp"])
 
-        # Sort by timestamp ascending
-        filtered_logs.sort(key=lambda x: x["timestamp"])
-
-        if not filtered_logs:
+        if not parsed_logs:
             return {"data": []}
 
-        start_time = filtered_logs[0]["timestamp"]
-        end_time = filtered_logs[-1]["timestamp"]
+        start_time = parsed_logs[0]["timestamp"]
+        end_time = parsed_logs[-1]["timestamp"]
         current_time = start_time
         complete_data = []
 
+        log_dict = {entry["timestamp"]: entry for entry in parsed_logs}
+
         while current_time <= end_time:
-            match = next((item for item in filtered_logs if item["timestamp"] == current_time), None)
-            if match:
-                complete_data.append(match)
+            if current_time in log_dict:
+                complete_data.append(log_dict[current_time])
             else:
                 complete_data.append({
                     "cpu_temperature": 0,
                     "cpu_usage": 0,
                     "ram_usage": 0,
                     "cpu_clock_mhz": 0,
-                    "uptime_seconds": 0,
                     "network_sent_bytes": complete_data[-1]["network_sent_bytes"] if complete_data else 0,
                     "network_recv_bytes": complete_data[-1]["network_recv_bytes"] if complete_data else 0,
                     "timestamp": current_time
                 })
-            current_time += timedelta(seconds=5)  # Step forward in 5-second increments
+            current_time += timedelta(seconds=TIMESPAN_SECONDS)
 
-        return {"data": complete_data}
+        return {"data": complete_data, "uptime_seconds": await redis_client.get("current_uptime_seconds")}
 
     except Exception as e:
         print(e)
@@ -109,17 +109,34 @@ async def get_server_resource_logs(timeframe: str = Query(None)):
 @router.post("/logs/system_resources")
 async def store_server_resource_logs(data: dict):
     try:
+        now = datetime.now(timezone.utc)
+        
+        # Round down to the nearest 10-second interval
+        clamped_timestamp = now.replace(second=(now.second // 10) * 10, microsecond=0)
+
         log_entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            **data
+            "timestamp": clamped_timestamp.isoformat(),
+            "cpu_temperature": data.get("cpu_temperature"),
+            "cpu_usage": data.get("cpu_usage"),
+            "ram_usage": data.get("ram_usage"),
+            "cpu_clock_mhz": data.get("cpu_clock_mhz"),
+            "network_sent_bytes": data.get("network_sent_bytes"),
+            "network_recv_bytes": data.get("network_recv_bytes")
         }
 
-        # One log every 5 seconds
-        # 24 * 60 * 12 = 17280
-        MAX_LOGS_AMOUNT = 17280
+        score = clamped_timestamp.timestamp()
 
-        await redis_client.lpush("system_resource_logs", json.dumps(log_entry))
-        await redis_client.ltrim("system_resource_logs", 0, MAX_LOGS_AMOUNT - 1)
+        # Store the uptime_seconds in a separate key
+        if "uptime_seconds" in data:
+            await redis_client.set("current_uptime_seconds", data["uptime_seconds"])
+
+        # Add the log entry to the sorted set
+        await redis_client.zadd("system_resource_logs_zset", {json.dumps(log_entry): score})
+
+        # Optional: prune old entries to keep only 8640 logs (about 24h if logging every 10s)
+        # This deletes older than 24h
+        cutoff = score - 86400
+        await redis_client.zremrangebyscore("system_resource_logs_zset", 0, cutoff)
 
         return {"message": "Success"}
 
