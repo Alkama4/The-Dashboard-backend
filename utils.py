@@ -1,18 +1,18 @@
 # Standard libraries
 import asyncio
+import redis.asyncio as redis
 import os
-from collections import OrderedDict
 import mysql.connector
 import httpx
 from fastapi import HTTPException
-
-# Keep a couple copies of the search results cached for the duration of the server runtime
-# Might want to replace this with a mysql table wit BLOBs in the future because of workers.
-tmdbQueryCacheMaxSize = 5
-tmdbQueryCache = OrderedDict()
+from datetime import timedelta
+import json
 
 # Semaphore so that we don't overwhelm the network with hundreads of conncections.
 semaphore = asyncio.Semaphore(5)
+
+# Set up aioredis client
+redis_client = redis.from_url(os.getenv("REDIS_PATH", "redis://127.0.0.1:6379"), decode_responses=True)
 
 
 # Function to connect to MySQL and perform a query
@@ -66,6 +66,21 @@ def query_mysql(query: str, params: tuple = (), fetch_last_row_id=False, use_dic
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"MySQL query error: {str(e)}")
+
+
+# Helper function to store to redis cache
+async def add_to_cache(key: str, data: dict, timedelta: timedelta):
+    # Store the data as JSON in Redis with an expiration of 1 week
+    await redis_client.setex(key, timedelta, json.dumps(data))
+
+
+# Helper function to retrieve from redis cache
+async def get_from_cache(key: str) -> dict:
+    # Retrieve data from Redis and parse it
+    data = await redis_client.get(key)
+    if data:
+        return json.loads(data)
+    return None
 
 
 # Function to query the TMDB servers
@@ -137,17 +152,6 @@ def validate_session_key(session_key=None, guest_lock=True):
     else:
         raise HTTPException(status_code=405, detail="Account required.")
 
-
-# Add search queries to cache since it takes so long to fetch them
-def add_to_cache(key, value):
-    global tmdbQueryCache
-    
-    # If the cache is full, pop the oldest item
-    if len(tmdbQueryCache) >= tmdbQueryCacheMaxSize:
-        tmdbQueryCache.popitem(last=False)  # Remove the oldest item
-    
-    # Add the new item to the cache
-    tmdbQueryCache[key] = value
 
 # Used to get settings values e.g. for title limit
 def fetch_user_settings(user_id: int, setting_name: str):

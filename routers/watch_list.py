@@ -1,13 +1,13 @@
 # External imports
+from datetime import timedelta
 from fastapi import HTTPException, APIRouter, Query, Depends
-from pydantic import BaseModel
 from typing import Optional
 from pathlib import Path
 import asyncio
 import os
 
 # Internal imports
-from utils import query_mysql, query_tmdb, query_omdb, download_image, validate_session_key, add_to_cache, fetch_user_settings, tmdbQueryCache
+from utils import query_mysql, query_tmdb, query_omdb, download_image, validate_session_key, add_to_cache, fetch_user_settings, add_to_cache, get_from_cache
 
 # Create the router object for this module
 router = APIRouter()
@@ -1803,26 +1803,29 @@ def remove_title_from_collection(collection_id: int, title_id: int, data: dict):
 # Acts as a middle man between TMDB search and vue. 
 # Adds proper genres and the fact wether the user has added the title or not.
 @router.get("/search")
-def watch_list_search(
+async def watch_list_search(
     session_key: str = Query(...),
     title_category: str = Query(..., regex="^(movie|tv)$"),
     title_name: str = Query(None),
 ):
-    global tmdbQueryCache
-
     # Validate the session key and retrieve the user ID
     user_id = validate_session_key(session_key, False)
 
     # Fetch search results from cache or TMDB API
     if title_name:
         title_lower = title_name.lower()
-        search_results = tmdbQueryCache.get(title_lower)
+
+        # Try to get from Redis cache first
+        search_results = await get_from_cache(title_lower)
         if search_results is None:
             search_results = query_tmdb(
                 f"/search/{title_category}",
                 {"query": title_name, "include_adult": False}
             )
-            add_to_cache(title_lower, search_results)  # Store results in cache
+            # Store results in Redis cache
+            await add_to_cache(title_lower, search_results, timedelta(weeks=1))
+        else:
+            print(f"Found \"{title_lower}\" from redis. Using it instead of querying TMDB.")
     else:
         raise HTTPException(status_code=400, detail="Title name is required.")
 

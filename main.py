@@ -31,6 +31,7 @@ app.include_router(spendings_router, prefix="/spendings", tags=["spendings"])
 app.include_router(watch_list_router, prefix="/watch_list", tags=["watch_list"])
 
 
+
 # Runs everytime an endpoint is called. Used to log request for analysis.
 @app.middleware("http")
 async def log_request_data(request: Request, call_next):
@@ -61,9 +62,12 @@ async def log_request_data(request: Request, call_next):
 # Landing page that dynamically shows endpoints
 @app.get("/")
 def root(request: Request):
-    # Dynamically generate a list of all available endpoints
-    endpoints = [route.path for route in app.routes]
-    
+    endpoints = [
+        f"{', '.join(route.methods)} {route.path}"
+        for route in app.routes
+        if route.methods
+    ]
+
     return {
         "Head": "Hello world!",
         "Text": "Welcome to the FastAPI backend for the Vue.js frontend. The available endpoints are listed below.",
