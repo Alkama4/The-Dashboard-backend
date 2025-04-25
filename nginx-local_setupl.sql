@@ -187,7 +187,9 @@ CREATE TABLE IF NOT EXISTS user_collection (
     user_id INT NOT NULL,
     name VARCHAR(255) NOT NULL,
     description TEXT,
-    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+    parent_collection_id INT DEFAULT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (parent_collection_id) REFERENCES user_collection(collection_id) ON DELETE CASCADE
 );
 
 DROP TABLE IF EXISTS collection_title;

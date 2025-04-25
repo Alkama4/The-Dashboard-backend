@@ -8,7 +8,6 @@ import json
 # Internal imports
 from routers.account import router as account_router 
 from routers.media import router as media_router
-from routers.redirect import router as redirect_router 
 from routers.server import router as server_router 
 from routers.spendings import router as spendings_router 
 from routers.watch_list import router as watch_list_router 
@@ -27,11 +26,9 @@ app.add_middleware(
 # Include the account routes in the FastAPI app
 app.include_router(account_router, prefix="/account", tags=["account"])
 app.include_router(media_router, prefix="/media", tags=["media"])
-app.include_router(redirect_router, prefix="/redirect", tags=["redirect"])  # TODO: Implement or figure better alternative
 app.include_router(server_router, prefix="/server", tags=["server"])
 app.include_router(spendings_router, prefix="/spendings", tags=["spendings"])
 app.include_router(watch_list_router, prefix="/watch_list", tags=["watch_list"])
-
 
 
 # Runs everytime an endpoint is called. Used to log request for analysis.

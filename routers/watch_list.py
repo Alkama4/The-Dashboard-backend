@@ -863,31 +863,25 @@ def convert_season_or_episode_id_to_title_id(season_id=None, episode_id=None):
 
 
 def keep_title_watch_count_up_to_date(user_id, title_id=None, season_id=None, episode_id=None):
-    # If we don't have title_id, get it from season_id or episode_id
     if not title_id:
         title_id = convert_season_or_episode_id_to_title_id(season_id, episode_id)
 
-    # If we have the title_id, proceed with checking episodes
     if title_id:
-        check_all_watched_query = """
-            SELECT COUNT(*) 
+        min_watch_count_query = """
+            SELECT MIN(COALESCE(ued.watch_count, 0))
             FROM episodes e
             LEFT JOIN user_episode_details ued ON e.episode_id = ued.episode_id AND ued.user_id = %s
             WHERE e.title_id = %s
-            AND (ued.watch_count IS NULL OR ued.watch_count = 0)
         """
-        result = query_mysql(check_all_watched_query, (user_id, title_id))
-        
-        # Check if all episodes are watched
-        all_watched = result[0][0] == 0
-        
-        # Update the title's watch_count based on the check
+        result = query_mysql(min_watch_count_query, (user_id, title_id))
+        min_watch_count = result[0][0] if result else 0
+
         update_title_watch_count_query = """
             INSERT INTO user_title_details (user_id, title_id, watch_count)
             VALUES (%s, %s, %s)
             ON DUPLICATE KEY UPDATE watch_count = %s
         """
-        query_mysql(update_title_watch_count_query, (user_id, title_id, 1 if all_watched else 0, 1 if all_watched else 0))
+        query_mysql(update_title_watch_count_query, (user_id, title_id, min_watch_count, min_watch_count))
 
 
 def get_updated_user_title_data(user_id: int, title_id: int):
@@ -1222,8 +1216,10 @@ def update_title_watch_count(title_id: int, data: dict):
         else:
             raise HTTPException(status_code=400, detail="Invalid title type")
 
-        updated_data = get_updated_user_title_data(user_id, title_id)
-        return {"message": "Watch count updated!", "updated_data": updated_data}
+        return {"message": "Watch count updated!"}
+
+        # updated_data = get_updated_user_title_data(user_id, title_id)
+        # return {"message": "Watch count updated!", "updated_data": updated_data}
 
     except HTTPException as e:
         raise e
@@ -1251,8 +1247,10 @@ def update_season_watch_count(title_id: int, season_id: int, data: dict):
         query_mysql(query, (user_id, watch_count, season_id))
         keep_title_watch_count_up_to_date(user_id, season_id=season_id)
 
-        updated_data = get_updated_user_title_data(user_id, title_id)
-        return {"message": "Season watch count updated!", "updated_data": updated_data}
+        return {"message": "Season watch count updated!"}
+
+        # updated_data = get_updated_user_title_data(user_id, title_id)
+        # return {"message": "Season watch count updated!", "updated_data": updated_data}
 
     except HTTPException as e:
         raise e
@@ -1278,8 +1276,10 @@ def update_episode_watch_count(title_id: int, episode_id: int, data: dict):
         query_mysql(query, (user_id, episode_id, watch_count))
         keep_title_watch_count_up_to_date(user_id, episode_id=episode_id)
 
-        updated_data = get_updated_user_title_data(user_id, title_id)
-        return {"message": "Episode watch count updated!", "updated_data": updated_data}
+        return {"message": "Episode watch count updated!"}
+
+        # updated_data = get_updated_user_title_data(user_id, title_id)
+        # return {"message": "Episode watch count updated!", "updated_data": updated_data}
 
     except HTTPException as e:
         raise e
@@ -1509,7 +1509,7 @@ def get_title_info(
     # Get user_id and validate session key
     user_id = validate_session_key(session_key, False)
 
-    # Main title query (without collection details)
+    # Main title query
     get_titles_query = """
         SELECT 
             t.*, 
@@ -1517,20 +1517,21 @@ def get_title_info(
             utd.notes, 
             utd.favourite, 
             utd.last_updated AS user_title_last_updated,
+            utd.title_id IS NOT NULL AS in_watch_list,
             GROUP_CONCAT(DISTINCT g.genre_name ORDER BY g.genre_name SEPARATOR ', ') AS genres
         FROM titles t
         LEFT JOIN user_title_details utd ON utd.title_id = t.title_id AND utd.user_id = %s
         LEFT JOIN title_genres tg ON t.title_id = tg.title_id
         LEFT JOIN genres g ON tg.genre_id = g.genre_id
         WHERE t.title_id = %s
-        GROUP BY t.title_id, utd.watch_count, utd.notes, utd.favourite, utd.last_updated;
+        GROUP BY t.title_id, utd.watch_count, utd.notes, utd.favourite, utd.last_updated, utd.title_id;
     """
     title_query_results = query_mysql(get_titles_query, (user_id, title_id), use_dictionary=True)
     if not title_query_results:
         raise HTTPException(status_code=404, detail="The title doesn't exist.")
     title_data = title_query_results[0]
 
-    # Separate query for full collection details
+    # Separate query for collection details
     get_collections_query = """
         SELECT 
             uc.collection_id,
@@ -1734,53 +1735,51 @@ def delete_collection(collection_id: int, data: dict):
 def list_collections(session_key: str = Query(...)):
     user_id = validate_session_key(session_key)
 
-    # Get collections
     query = """
         SELECT
             collection_id,
             name,
-            description
+            description,
+            parent_collection_id
         FROM user_collection
         WHERE user_id = %s
         ORDER BY name
     """
     collections = query_mysql(query, (user_id,), use_dictionary=True)
 
-    # Fetch titles for each collection
-    for collection in collections:
-        # Apply filters and sorting based on collection ID
-        filters = {
-            'collection_id': collection['collection_id']
-        }
-        sort = {
-            'sort_by': 'latest_updated'
-        }
+    collection_map = {c['collection_id']: {**c, 'titles': [], 'children': []} for c in collections}
 
+    for collection in collection_map.values():
         query, query_params = build_titles_query(
-            user_id, 
-            title_type=None, 
-            watched=None, 
-            favourite=None, 
-            released=None, 
-            started=None, 
-            all_titles=None, 
-            search_term=None, 
-            collection_id=collection['collection_id'], 
-            sort_by='latest_updated', 
-            direction='DESC', 
-            offset=0, 
+            user_id,
+            title_type=None,
+            watched=None,
+            favourite=None,
+            released=None,
+            started=None,
+            all_titles=None,
+            search_term=None,
+            collection_id=collection['collection_id'],
+            sort_by='release_date',
+            direction='ASC',
+            offset=0,
             title_limit=None
         )
-
         titles = query_mysql(query, tuple(query_params), use_dictionary=True)
-
-        # Process genres for each title
         for row in titles:
             row["genres"] = row["genres"].split(", ") if row["genres"] else []
-
         collection['titles'] = titles
 
-    return collections
+    roots = []
+    for collection in collection_map.values():
+        parent_id = collection['parent_collection_id']
+        if parent_id:
+            collection_map[parent_id]['children'].append(collection)
+        else:
+            roots.append(collection)
+
+    return roots
+
 
 
 @router.put("/collections/{collection_id}/title/{title_id}")
