@@ -7,6 +7,7 @@ import httpx
 from fastapi import HTTPException
 from datetime import timedelta
 import json
+import aiomysql
 
 # Semaphore so that we don't overwhelm the network with hundreads of conncections.
 semaphore = asyncio.Semaphore(5)
@@ -15,7 +16,42 @@ semaphore = asyncio.Semaphore(5)
 redis_client = redis.from_url(os.getenv("REDIS_PATH", "redis://127.0.0.1:6379"), decode_responses=True)
 
 
-# Function to connect to MySQL and perform a query
+# Establishes an asynchronous connection to the MySQL database
+async def aiomysql_connect():
+    return await aiomysql.connect(
+        user=os.getenv("DB_USER", "default"),
+        password=os.getenv("DB_PASSWORD", "default"),
+        db=os.getenv("DB_NAME", "default"),
+        host=os.getenv("DB_HOST", "default"),
+        port=3306
+    )
+
+# Executes a MySQL query asynchronously and returns the result as a list of dictionaries
+async def aiomysql_conn_execute(conn, query: str, params: tuple = ()) -> list:
+    async with conn.cursor(aiomysql.DictCursor) as cursor:
+        await cursor.execute(query, params)
+        result = await cursor.fetchall()
+        return result
+
+# Executes a single MySQL query and returns the result as a list of dictionaries.
+# Suitable for single queries. For multiple queries, use the `conn` method directly.
+async def aiomysql_execute(query: str, params: tuple = ()) -> list:
+    conn = await aiomysql_connect()
+    try:
+        return await aiomysql_conn_execute(conn, query, params)
+    except aiomysql.MySQLError as e:
+        detail = f"MySQL error: {e}"
+        print(detail)
+        raise HTTPException(status_code=500, detail=detail)
+    except Exception as e:
+        detail = f"Unknown error with aiomysql: {e}"
+        print(detail)
+        raise HTTPException(status_code=500, detail=detail)
+    finally:
+        conn.close()
+
+
+# Old sync (not async) function to connect to MySQL and perform a query
 def query_mysql(query: str, params: tuple = (), fetch_last_row_id=False, use_dictionary=False):
     try:
         # Test to see if it can communicate on the bridge network and if that makes a difference

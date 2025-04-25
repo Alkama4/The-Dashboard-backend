@@ -3,3 +3,4 @@ psutil
 pandas
 pillow
 redis
+aiomysql
