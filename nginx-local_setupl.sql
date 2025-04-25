@@ -96,7 +96,6 @@ CREATE TABLE IF NOT EXISTS titles (
     origin_country VARCHAR(64),
     awards VARCHAR(255),
     age_rating VARCHAR(10),
-    trailer_key CHAR(11),
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
@@ -200,6 +199,20 @@ CREATE TABLE IF NOT EXISTS collection_title (
     FOREIGN KEY (collection_id) REFERENCES user_collection(collection_id) ON DELETE CASCADE,
     FOREIGN KEY (title_id) REFERENCES titles(title_id) ON DELETE CASCADE
 );
+
+
+-- Trailers
+DROP TABLE IF EXISTS title_trailers;
+CREATE TABLE IF NOT EXISTS title_trailers (
+    youtube_id VARCHAR(11) NOT NULL,
+    title_id INT NOT NULL,
+    video_name VARCHAR(255),
+    is_default BOOLEAN DEFAULT FALSE,
+    PRIMARY KEY (youtube_id),
+    UNIQUE KEY (title_id, youtube_id),
+    FOREIGN KEY (title_id) REFERENCES titles(title_id) ON DELETE CASCADE
+);
+
 
 
 --------------- INDEXES ---------------

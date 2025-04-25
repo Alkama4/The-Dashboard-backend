@@ -1,10 +1,11 @@
 # External imports
 from datetime import timedelta
-from fastapi import HTTPException, APIRouter, Query, Depends
+from fastapi import HTTPException, APIRouter, Query
 from typing import Optional
 from pathlib import Path
 import asyncio
 import os
+import httpx
 
 # Internal imports
 from utils import query_mysql, query_tmdb, query_omdb, download_image, validate_session_key, add_to_cache, fetch_user_settings, add_to_cache, get_from_cache
@@ -160,6 +161,61 @@ def add_or_update_genres_for_title(title_id, tmdb_genres):
         query_mysql(insert_genre_query)
 
 
+# Seperate function to handle the api request
+async def get_video_name(youtube_id):
+    print(f"Querying Youtube API v3: {youtube_id}")
+    url = "https://www.googleapis.com/youtube/v3/videos"
+    params = {
+        'part': 'snippet',
+        'id': youtube_id,
+        'key': os.getenv("YOUTUBE_API_KEY")
+    }
+    
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url, params=params)
+    
+    if response.status_code == 200:
+        data = response.json()
+        if 'items' in data and len(data['items']) > 0:
+            return data['items'][0]['snippet']['title']
+    return None  # Return None if the video was not found
+
+
+# Used for the tvs and movies to add the trailers to a title avoid duplication
+async def add_or_update_trailers_for_title(title_id, youtube_ids):
+    if not youtube_ids:
+        return  # No youtube ids to add
+    
+    # Construct the INSERT query to add new trailers
+    values = []
+    params = []
+    
+    # Set the first trailer in the list as the default if no default exists yet
+    is_default = True  # Assume the first trailer is the default for simplicity
+    
+    # Get video names from YouTube API
+    video_names = []
+    for youtube_id in youtube_ids:
+        video_name = await get_video_name(youtube_id)
+        video_names.append(video_name if video_name else 'Unknown')  # Default to 'Unknown' if no name found
+    
+    for i, youtube_id in enumerate(youtube_ids):
+        values.append("(%s, %s, %s, %s)")  # Adding a video_name to the insert query
+        params.extend([youtube_id, title_id, video_names[i], is_default])
+        is_default = False  # Set is_default to False for the rest of the trailers
+    
+    # Insert the new trailers (assuming they don't exist already)
+    insert_query = f"""
+        INSERT INTO title_trailers (youtube_id, title_id, video_name, is_default)
+        VALUES {', '.join(values)}
+        ON DUPLICATE KEY UPDATE
+            is_default = VALUES(is_default), video_name = VALUES(video_name);
+    """
+    
+    # Execute the insert query with params
+    query_mysql(insert_query, params)
+
+
 # Used for both tv and movies the same way to unify with a function
 # Get just the stuff that we can't get from tmdb
 def get_extra_info_from_omdb(imdb_id, title_id):
@@ -230,12 +286,10 @@ async def add_or_update_movie_title(
                     movie_title_age_rating = None
 
             # Retrieve the youtube trailer key
-            movie_title_trailer_key = None
+            movie_title_trailers_youtube_ids = []
             for video in movie_title_info["videos"]["results"]:
                 if video["site"] == "YouTube" and video["type"] == "Trailer":
-                    movie_title_trailer_key = video["key"]
-                    if video["official"] == True:
-                        break
+                    movie_title_trailers_youtube_ids.append(video["key"])
 
             # Retrieve the production countries and just add them up to a list
             movie_title_production_countries = ""
@@ -261,7 +315,6 @@ async def add_or_update_movie_title(
                 movie_title_info.get('release_date'),
                 movie_title_info.get('original_language'),
                 movie_title_age_rating,
-                movie_title_trailer_key,
                 movie_title_info.get('revenue'),
                 movie_title_info.get('budget'),
                 movie_title_production_countries
@@ -287,7 +340,6 @@ async def add_or_update_movie_title(
                     release_date,
                     original_language,
                     age_rating,
-                    trailer_key,
                     revenue,
                     budget,
                     production_countries
@@ -307,7 +359,6 @@ async def add_or_update_movie_title(
                     release_date = VALUES(release_date),
                     original_language = VALUES(original_language),
                     age_rating = VALUES(age_rating),
-                    trailer_key = VALUES(trailer_key),
                     revenue = VALUES(revenue),
                     budget = VALUES(budget),
                     production_countries = VALUES(production_countries);
@@ -328,6 +379,9 @@ async def add_or_update_movie_title(
 
             # Handle genres using the seperate function
             add_or_update_genres_for_title(title_id, movie_title_info.get('genres', []))
+
+            # Handle trailers with the seperate function
+            await add_or_update_trailers_for_title(title_id, movie_title_trailers_youtube_ids)
 
             # OMDB query to get more info
             get_extra_info_from_omdb(movie_title_info.get('imdb_id'), title_id)
@@ -395,12 +449,10 @@ async def add_or_update_tv_title(
                         tv_title_age_rating = ""
 
                 # Retrieve the youtube trailer key
-                tv_title_trailer_key = None
+                tv_title_trailers_youtube_ids = []
                 for video in tv_title_info["videos"]["results"]:
                     if video["site"] == "YouTube" and video["type"] == "Trailer":
-                        tv_title_trailer_key = video["key"]
-                        if video["official"] == True:
-                            break
+                        tv_title_trailers_youtube_ids.append(video["key"])
 
                 # Retrieve the imdb id seperately since it's not part of the base query like in movies
                 imdb_id = tv_title_info.get('external_ids', {}).get('imdb_id')
@@ -428,7 +480,6 @@ async def add_or_update_tv_title(
                     tv_title_info.get('first_air_date'),
                     tv_title_info.get('original_language'),
                     tv_title_age_rating,
-                    tv_title_trailer_key,
                     # tv_title_info.get('revenue'), # Doesn't seem to exist on tv
                     # tv_title_info.get('budget'),  # Doesn't seem to exist on tv
                     tv_title_production_countries
@@ -453,7 +504,6 @@ async def add_or_update_tv_title(
                         release_date,
                         original_language,
                         age_rating,
-                        trailer_key,
                         production_countries
                     )
                     VALUES ({tv_title_placeholders})
@@ -470,7 +520,6 @@ async def add_or_update_tv_title(
                         release_date = VALUES(release_date),
                         original_language = VALUES(original_language),
                         age_rating = VALUES(age_rating),
-                        trailer_key = VALUES(trailer_key),
                         production_countries = VALUES(production_countries);
                 """
 
@@ -489,6 +538,9 @@ async def add_or_update_tv_title(
 
                 # Handle genres using the function
                 add_or_update_genres_for_title(title_id, tv_title_info.get('genres', []))
+
+                # Handle trailers with the seperate function
+                await add_or_update_trailers_for_title(title_id, tv_title_trailers_youtube_ids)
 
                 # OMDB query to get more info
                 get_extra_info_from_omdb(imdb_id, title_id)
@@ -968,44 +1020,6 @@ def check_collection_ownership(collection_id: int, user_id: int):
 
 
 # ------------ Titles ------------
-
-# Used to manually update the genres if they change etc. In the past was ran always on start, but since it ran on all 4 workers the feature was removed. Basically only used if I were to wipe the whole db
-@router.put("/titles/genres")
-def fetch_genres():
-    # Fetch movie genres
-    movie_genres = query_tmdb("/genre/movie/list", {})
-    if movie_genres:
-        for genre in movie_genres.get("genres", []):
-            genre_id = genre.get("id")
-            genre_name = genre.get("name")
-            # Check if genre exists in the database
-            existing_genre = query_mysql("SELECT * FROM genres WHERE tmdb_genre_id = %s", (genre_id,))
-            if not existing_genre:
-                # Insert new genre
-                query_mysql("INSERT INTO genres (tmdb_genre_id, genre_name) VALUES (%s, %s)", (genre_id, genre_name))
-            else:
-                # Update genre if name changes
-                query_mysql("UPDATE genres SET genre_name = %s WHERE tmdb_genre_id = %s", (genre_name, genre_id))
-        print("Movie genres stored!")
-
-    # Fetch TV genres
-    tv_genres = query_tmdb("/genre/tv/list", {})
-    if tv_genres:
-        for genre in tv_genres.get("genres", []):
-            genre_id = genre.get("id")
-            genre_name = genre.get("name")
-            # Check if genre exists in the database
-            existing_genre = query_mysql("SELECT * FROM genres WHERE tmdb_genre_id = %s", (genre_id,))
-            if not existing_genre:
-                # Insert new genre
-                query_mysql("INSERT INTO genres (tmdb_genre_id, genre_name) VALUES (%s, %s)", (genre_id, genre_name))
-            else:
-                # Update genre if name changes
-                query_mysql("UPDATE genres SET genre_name = %s WHERE tmdb_genre_id = %s", (genre_name, genre_id))
-        print("TV genres stored!")
-
-    return {"Result": "Genres updated!",}
-
 
 # Allows both title_id and tmdb_id, while preferring title_id
 @router.post("/titles")
@@ -1542,6 +1556,17 @@ def get_title_info(
         WHERE ct.title_id = %s AND uc.user_id = %s;
     """
     collection_results = query_mysql(get_collections_query, (title_id, user_id), use_dictionary=True)
+
+    # Separate query for the titles
+    get_trailer_keys_query = """
+        SELECT 
+            youtube_id AS trailer_key,
+            video_name,
+            is_default
+        FROM title_trailers
+        WHERE title_id = %s;
+    """
+    title_trarilers_result = query_mysql(get_trailer_keys_query, (title_id,), use_dictionary=True)
     
     custom_links = custom_combined_links(title_data["name"])
 
@@ -1553,6 +1578,7 @@ def get_title_info(
         "backdrop_image_count": get_backdrop_count(title_data["title_id"]),
         "logo_file_type": get_logo_type(title_data["title_id"]),
         "watch_now_links": custom_links["links"],
+        "trailers": title_trarilers_result,
     }
 
     # Query and append extra tv-series related info to title_info
@@ -1893,6 +1919,45 @@ async def watch_list_search(
         result['in_watch_list'] = tmdb_id in watchlist_dict
 
     return search_results
+
+
+# Used to manually update the genres if they change etc. In the past was ran always on start, but since it ran on all 4 workers the feature was removed. Basically only used if I were to wipe the whole db.
+@router.put("/genres")
+def update_genres():
+    # Fetch movie genres
+    movie_genres = query_tmdb("/genre/movie/list", {})
+    if movie_genres:
+        for genre in movie_genres.get("genres", []):
+            genre_id = genre.get("id")
+            genre_name = genre.get("name")
+            # Check if genre exists in the database
+            existing_genre = query_mysql("SELECT * FROM genres WHERE tmdb_genre_id = %s", (genre_id,))
+            if not existing_genre:
+                # Insert new genre
+                query_mysql("INSERT INTO genres (tmdb_genre_id, genre_name) VALUES (%s, %s)", (genre_id, genre_name))
+            else:
+                # Update genre if name changes
+                query_mysql("UPDATE genres SET genre_name = %s WHERE tmdb_genre_id = %s", (genre_name, genre_id))
+        print("Movie genres stored!")
+
+    # Fetch TV genres
+    tv_genres = query_tmdb("/genre/tv/list", {})
+    if tv_genres:
+        for genre in tv_genres.get("genres", []):
+            genre_id = genre.get("id")
+            genre_name = genre.get("name")
+            # Check if genre exists in the database
+            existing_genre = query_mysql("SELECT * FROM genres WHERE tmdb_genre_id = %s", (genre_id,))
+            if not existing_genre:
+                # Insert new genre
+                query_mysql("INSERT INTO genres (tmdb_genre_id, genre_name) VALUES (%s, %s)", (genre_id, genre_name))
+            else:
+                # Update genre if name changes
+                query_mysql("UPDATE genres SET genre_name = %s WHERE tmdb_genre_id = %s", (genre_name, genre_id))
+        print("TV genres stored!")
+
+    return {"Result": "Genres updated!",}
+
 
 
 
