@@ -6,9 +6,10 @@ from pathlib import Path
 import asyncio
 import os
 import httpx
+import json
 
 # Internal imports
-from utils import query_mysql, query_tmdb, query_omdb, download_image, validate_session_key, add_to_cache, fetch_user_settings, add_to_cache, get_from_cache
+from utils import query_mysql, query_tmdb, query_omdb, download_image, validate_session_key, add_to_cache, fetch_user_settings, add_to_cache, get_from_cache, aiomysql_connect, aiomysql_conn_execute, validate_session_key_conn
 from custom_values import custom_combined_links
 
 # Create the router object for this module
@@ -1516,14 +1517,17 @@ def list_titles(
 
 
 @router.get("/titles/{title_id}")
-def get_title_info(
+async def get_title_info(
     title_id: int,
     session_key: str = Query(...),
 ):
-    # Get user_id and validate session key
-    user_id = validate_session_key(session_key, False)
+    # Setup connection
+    conn = await aiomysql_connect()
 
-    # Main title query
+    # Get user_id and validate session key
+    user_id = await validate_session_key_conn(conn, session_key, False)
+
+    # Combined title, collections, and trailers query
     get_titles_query = """
         SELECT 
             t.*, 
@@ -1532,7 +1536,18 @@ def get_title_info(
             utd.favourite, 
             utd.last_updated AS user_title_last_updated,
             utd.title_id IS NOT NULL AS in_watch_list,
-            GROUP_CONCAT(DISTINCT g.genre_name ORDER BY g.genre_name SEPARATOR ', ') AS genres
+            GROUP_CONCAT(DISTINCT g.genre_name ORDER BY g.genre_name SEPARATOR ', ') AS genres,
+            -- Subquery for collections
+            (SELECT JSON_ARRAYAGG(
+                JSON_OBJECT('collection_id', uc.collection_id, 'name', uc.name, 'description', uc.description)
+            ) FROM user_collection uc
+            INNER JOIN collection_title ct ON ct.collection_id = uc.collection_id
+            WHERE ct.title_id = t.title_id AND uc.user_id = %s) AS collections,
+            -- Subquery for trailers
+            (SELECT JSON_ARRAYAGG(
+                JSON_OBJECT('trailer_key', youtube_id, 'video_name', video_name, 'is_default', is_default)
+            ) FROM title_trailers
+            WHERE title_id = t.title_id) AS trailers
         FROM titles t
         LEFT JOIN user_title_details utd ON utd.title_id = t.title_id AND utd.user_id = %s
         LEFT JOIN title_genres tg ON t.title_id = tg.title_id
@@ -1540,50 +1555,27 @@ def get_title_info(
         WHERE t.title_id = %s
         GROUP BY t.title_id, utd.watch_count, utd.notes, utd.favourite, utd.last_updated, utd.title_id;
     """
-    title_query_results = query_mysql(get_titles_query, (user_id, title_id), use_dictionary=True)
+    title_query_results = await aiomysql_conn_execute(conn, get_titles_query, (user_id, user_id, title_id))
     if not title_query_results:
         raise HTTPException(status_code=404, detail="The title doesn't exist.")
     title_data = title_query_results[0]
 
-    # Separate query for collection details
-    get_collections_query = """
-        SELECT 
-            uc.collection_id,
-            uc.name,
-            uc.description
-        FROM user_collection uc
-        INNER JOIN collection_title ct ON ct.collection_id = uc.collection_id
-        WHERE ct.title_id = %s AND uc.user_id = %s;
-    """
-    collection_results = query_mysql(get_collections_query, (title_id, user_id), use_dictionary=True)
-
-    # Separate query for the titles
-    get_trailer_keys_query = """
-        SELECT 
-            youtube_id AS trailer_key,
-            video_name,
-            is_default
-        FROM title_trailers
-        WHERE title_id = %s;
-    """
-    title_trarilers_result = query_mysql(get_trailer_keys_query, (title_id,), use_dictionary=True)
-    
+    # Add custom links and other properties
     custom_links = custom_combined_links(title_data["name"])
 
     # Final assembled data
     title_info = {
         **title_data,
         "genres": title_data["genres"].split(", ") if title_data["genres"] else [],
-        "collections": collection_results,
+        "collections": json.loads(title_data["collections"]) if title_data["collections"] else [],
         "backdrop_image_count": get_backdrop_count(title_data["title_id"]),
         "logo_file_type": get_logo_type(title_data["title_id"]),
         "watch_now_links": custom_links["links"],
-        "trailers": title_trarilers_result,
+        "trailers": json.loads(title_data["trailers"]) if title_data["trailers"] else [],
     }
 
     # Query and append extra tv-series related info to title_info
     if title_info["type"] == "tv":
-
         # Get seasons
         get_seasons_query = """
             SELECT 
@@ -1599,7 +1591,7 @@ def get_title_info(
             WHERE title_id = %s
             ORDER BY CASE WHEN season_number = 0 THEN 999 ELSE season_number END
         """
-        seasons = query_mysql(get_seasons_query, (title_id,), use_dictionary=True)
+        seasons = await aiomysql_conn_execute(conn, get_seasons_query, (title_id,))
 
         # Get Episodes
         get_episodes_query = """
@@ -1622,7 +1614,7 @@ def get_title_info(
             WHERE e.title_id = %s
             ORDER BY e.season_id, e.episode_number;
         """
-        episodes = query_mysql(get_episodes_query, (user_id, title_id), use_dictionary=True)
+        episodes = await aiomysql_conn_execute(conn, get_episodes_query, (user_id, title_id))
 
         # Get episodes links
         episode_links = custom_links["episodes"]
@@ -1644,6 +1636,8 @@ def get_title_info(
                 season_map[season_id]["episodes"].append(episode)
 
         title_info["seasons"] = list(season_map.values())
+    
+    conn.close()
 
     return {"title_info": title_info}
 

@@ -27,8 +27,9 @@ async def aiomysql_connect():
     )
 
 # Executes a MySQL query asynchronously and returns the result as a list of dictionaries
-async def aiomysql_conn_execute(conn, query: str, params: tuple = ()) -> list:
-    async with conn.cursor(aiomysql.DictCursor) as cursor:
+async def aiomysql_conn_execute(conn, query: str, params: tuple = (), use_array: bool = False) -> list:
+    cursor_class = aiomysql.DictCursor if not use_array else aiomysql.Cursor
+    async with conn.cursor(cursor_class) as cursor:
         await cursor.execute(query, params)
         result = await cursor.fetchall()
         return result
@@ -174,7 +175,7 @@ async def download_image(image_url: str, image_save_path: str, replace = False):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Used to validate the sesion key
+# Legacy, to be depricated
 def validate_session_key(session_key=None, guest_lock=True):
     if session_key != None and session_key != '' and session_key != 'null':
         # Validate the session and fetch user_id
@@ -185,6 +186,25 @@ def validate_session_key(session_key=None, guest_lock=True):
         return session_result[0][0]
     elif not guest_lock:
         return 1  # Default to guest's user_id (1) if no session key is provided
+    else:
+        raise HTTPException(status_code=405, detail="Account required.")
+
+# Used to validate the sesion key
+async def validate_session_key_conn(conn, session_key=None, guest_lock=True):
+    if session_key != None and session_key != '' and session_key != 'null':
+
+        # Validate the session and fetch user_id
+        session_query = "SELECT user_id FROM sessions WHERE session_id = %s AND expires_at > NOW()"
+        session_result = await aiomysql_conn_execute(conn, session_query, (session_key,), use_array=True)
+
+        if not session_result:
+            raise HTTPException(status_code=403, detail="Invalid or expired session key.")
+        
+        return session_result[0][0]
+    
+    elif not guest_lock:
+        return 1  # Default to guest's user_id (1) if no session key is provided
+    
     else:
         raise HTTPException(status_code=405, detail="Account required.")
 
