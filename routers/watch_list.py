@@ -8,6 +8,7 @@ import os
 
 # Internal imports
 from utils import query_mysql, query_tmdb, query_omdb, download_image, validate_session_key, add_to_cache, fetch_user_settings, add_to_cache, get_from_cache
+from custom_values import custom_combined_links
 
 # Create the router object for this module
 router = APIRouter()
@@ -1508,9 +1509,7 @@ def get_title_info(
     # Get user_id and validate session key
     user_id = validate_session_key(session_key, False)
 
-    # Fetch title details along with user-specific data (if available).
-    # Using LEFT JOIN ensures user details are included only if the title is in their watchlist,
-    # eliminating the need for a separate existence check.
+    # Main title query (without collection details)
     get_titles_query = """
         SELECT 
             t.*, 
@@ -1518,7 +1517,7 @@ def get_title_info(
             utd.notes, 
             utd.favourite, 
             utd.last_updated AS user_title_last_updated,
-            GROUP_CONCAT(g.genre_name ORDER BY g.genre_name SEPARATOR ', ') AS genres
+            GROUP_CONCAT(DISTINCT g.genre_name ORDER BY g.genre_name SEPARATOR ', ') AS genres
         FROM titles t
         LEFT JOIN user_title_details utd ON utd.title_id = t.title_id AND utd.user_id = %s
         LEFT JOIN title_genres tg ON t.title_id = tg.title_id
@@ -1526,28 +1525,39 @@ def get_title_info(
         WHERE t.title_id = %s
         GROUP BY t.title_id, utd.watch_count, utd.notes, utd.favourite, utd.last_updated;
     """
-
     title_query_results = query_mysql(get_titles_query, (user_id, title_id), use_dictionary=True)
-
-    # Validate result
     if not title_query_results:
         raise HTTPException(status_code=404, detail="The title doesn't exist.")
-
-    # Extract result as a dictionary
     title_data = title_query_results[0]
 
-    # Build final dictionary by unpacking title_data and adding extra fields
+    # Separate query for full collection details
+    get_collections_query = """
+        SELECT 
+            uc.collection_id,
+            uc.name,
+            uc.description
+        FROM user_collection uc
+        INNER JOIN collection_title ct ON ct.collection_id = uc.collection_id
+        WHERE ct.title_id = %s AND uc.user_id = %s;
+    """
+    collection_results = query_mysql(get_collections_query, (title_id, user_id), use_dictionary=True)
+    
+    custom_links = custom_combined_links(title_data["name"])
+
+    # Final assembled data
     title_info = {
-        **title_data,  # Includes all query results directly
-        "genres": title_data["genres"].split(", ") if title_data["genres"] else [], # Overwrite genres
+        **title_data,
+        "genres": title_data["genres"].split(", ") if title_data["genres"] else [],
+        "collections": collection_results,
         "backdrop_image_count": get_backdrop_count(title_data["title_id"]),
         "logo_file_type": get_logo_type(title_data["title_id"]),
-        "watch_now_available": True,
+        "watch_now_links": custom_links["links"],
     }
 
-    # Get the seasons and episodes if it's a TV show
+    # Query and append extra tv-series related info to title_info
     if title_info["type"] == "tv":
-        # Query to get seasons
+
+        # Get seasons
         get_seasons_query = """
             SELECT 
                 season_id, 
@@ -1564,7 +1574,7 @@ def get_title_info(
         """
         seasons = query_mysql(get_seasons_query, (title_id,), use_dictionary=True)
 
-        # Query to get episodes with user-specific details
+        # Get Episodes
         get_episodes_query = """
             SELECT 
                 e.season_id, 
@@ -1587,12 +1597,23 @@ def get_title_info(
         """
         episodes = query_mysql(get_episodes_query, (user_id, title_id), use_dictionary=True)
 
-        # Organizing data into seasons with episodes
+        # Get episodes links
+        episode_links = custom_links["episodes"]
+
+        # Map out and combine data
         season_map = {s["season_id"]: {**s, "episodes": []} for s in seasons}
+        season_number_map = {s["season_id"]: s["season_number"] for s in seasons}
 
         for episode in episodes:
             season_id = episode["season_id"]
+            season_number = season_number_map.get(season_id)
             if season_id in season_map:
+                episode_key = f"Episode {episode['episode_number']:02d}"
+                season_key = f"Season {season_number:02d}"
+                
+                if season_key in episode_links and episode_key in episode_links[season_key]:
+                    episode["watch_now_links"] = [episode_links[season_key][episode_key]]
+                
                 season_map[season_id]["episodes"].append(episode)
 
         title_info["seasons"] = list(season_map.values())
