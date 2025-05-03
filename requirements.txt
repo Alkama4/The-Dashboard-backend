@@ -4,3 +4,4 @@ pandas
 pillow
 redis
 aiomysql
+httpx

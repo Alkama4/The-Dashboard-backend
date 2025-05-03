@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from datetime import timedelta
 import json
 import aiomysql
+from contextlib import asynccontextmanager
 
 # Semaphore so that we don't overwhelm the network with hundreads of conncections.
 semaphore = asyncio.Semaphore(5)
@@ -26,13 +27,44 @@ async def aiomysql_connect():
         port=3306
     )
 
-# Executes a MySQL query asynchronously and returns the result as a list of dictionaries
-async def aiomysql_conn_execute(conn, query: str, params: tuple = (), use_array: bool = False) -> list:
-    cursor_class = aiomysql.DictCursor if not use_array else aiomysql.Cursor
+
+# Used in "async with get_aiomysql_conn() as conn:" to avoid having to always close the conn
+@asynccontextmanager
+async def get_aiomysql_conn():
+    conn = await aiomysql_connect()
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+# Execute a MySQL query and return result
+async def aiomysql_conn_execute(
+    conn,
+    query: str,
+    params: tuple = (),
+    use_dictionary: bool = True,
+    return_lastrowid: bool = False,
+    return_rowcount: bool = False
+) -> list:
+    # Select cursor class (dictionary or normal)
+    cursor_class = aiomysql.DictCursor if use_dictionary else aiomysql.Cursor
+
     async with conn.cursor(cursor_class) as cursor:
+        # Execute query with parameters
         await cursor.execute(query, params)
-        result = await cursor.fetchall()
-        return result
+
+        # Commit if query modifies data
+        if query.strip().lower().startswith(("insert", "update", "delete")):
+            await conn.commit()
+
+        # Return based on flags
+        if return_lastrowid:
+            return cursor.lastrowid
+        if return_rowcount:
+            return cursor.rowcount
+        return await cursor.fetchall()
+
 
 # Executes a single MySQL query and returns the result as a list of dictionaries.
 # Suitable for single queries. For multiple queries, use the `conn` method directly.
@@ -121,7 +153,7 @@ async def get_from_cache(key: str) -> dict:
 
 
 # Function to query the TMDB servers
-def query_tmdb(endpoint: str, params: dict = {}):
+async def query_tmdb(endpoint: str, params: dict = {}):
     headers = {
         "Authorization": f"Bearer {os.getenv('TMDB_ACCESS_TOKEN', 'default_token')}",
         "Accept": "application/json"
@@ -130,21 +162,21 @@ def query_tmdb(endpoint: str, params: dict = {}):
 
     print(f"Querying TMDB: {endpoint}")
     
-    with httpx.Client() as client:
-        response = client.get(f"https://api.themoviedb.org/3{endpoint}", params=params, headers=headers)
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"https://api.themoviedb.org/3{endpoint}", params=params, headers=headers)
         return response.json() if response.status_code == 200 else {}
 
 
 # Function to query for additional data like IMDB ratings from OMDB
-def query_omdb(imdb_id: str):
+async def query_omdb(imdb_id: str):
     params = {}
     params["apikey"] = os.getenv('OMDB_APIKEY', 'default_key')
     params["i"] = imdb_id
 
     print(f"Querying OMDB: {imdb_id}")
     
-    with httpx.Client() as client:
-        response = client.get(f"https://www.omdbapi.com", params=params)
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"https://www.omdbapi.com", params=params)
         return response.json() if response.status_code == 200 else {}
 
 
@@ -175,7 +207,7 @@ async def download_image(image_url: str, image_save_path: str, replace = False):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Legacy, to be depricated
+# DEPRICATED, MOVE TO ASYNC
 def validate_session_key(session_key=None, guest_lock=True):
     if session_key != None and session_key != '' and session_key != 'null':
         # Validate the session and fetch user_id
@@ -195,7 +227,7 @@ async def validate_session_key_conn(conn, session_key=None, guest_lock=True):
 
         # Validate the session and fetch user_id
         session_query = "SELECT user_id FROM sessions WHERE session_id = %s AND expires_at > NOW()"
-        session_result = await aiomysql_conn_execute(conn, session_query, (session_key,), use_array=True)
+        session_result = await aiomysql_conn_execute(conn, session_query, (session_key,), use_dictionary=False)
 
         if not session_result:
             raise HTTPException(status_code=403, detail="Invalid or expired session key.")
@@ -210,9 +242,9 @@ async def validate_session_key_conn(conn, session_key=None, guest_lock=True):
 
 
 # Used to get settings values e.g. for title limit
-def fetch_user_settings(user_id: int, setting_name: str):
+async def fetch_user_settings(conn, user_id: int, setting_name: str):
     query = f"SELECT {setting_name} FROM user_settings WHERE user_id = %s"
-    result = query_mysql(query, (user_id,), use_dictionary=True)
+    result = await aiomysql_conn_execute(conn, query, (user_id,), use_dictionary=True)
     return result[0][setting_name] if result else None
 
 
