@@ -9,7 +9,7 @@ import httpx
 import json
 
 # Internal imports
-from utils import query_mysql, query_tmdb, query_omdb, download_image, validate_session_key, add_to_cache, fetch_user_settings, add_to_cache, get_from_cache, aiomysql_connect, aiomysql_conn_execute, validate_session_key_conn, aiomysql_conn_get
+from utils import query_tmdb, query_omdb, download_image, add_to_cache, fetch_user_settings, add_to_cache, get_from_cache, aiomysql_connect, aiomysql_conn_execute, validate_session_key_conn, aiomysql_conn_get
 from custom_values import custom_combined_links
 
 # Create the router object for this module
@@ -944,45 +944,6 @@ async def keep_title_watch_count_up_to_date(conn, user_id, title_id=None, season
         await aiomysql_conn_execute(conn, update_title_watch_count_query, (user_id, title_id, min_watch_count, min_watch_count))
 
 
-def get_updated_user_title_data(user_id: int, title_id: int):
-    try:
-        result = {}
-
-        # Query for title's watch_count (for movie or TV show)
-        title_query = """
-            SELECT utd.watch_count
-            FROM user_title_details utd
-            WHERE utd.user_id = %s AND utd.title_id = %s
-        """
-        title_info = query_mysql(title_query, (user_id, title_id))
-
-        if title_info:
-            result["title_id"] = title_id
-            result["watch_count"] = title_info[0][0]
-
-            # Query for episodes if it's a TV show
-            episode_query = """
-                SELECT e.episode_id, e.episode_name, ued.watch_count
-                FROM episodes e
-                LEFT JOIN user_episode_details ued 
-                    ON e.episode_id = ued.episode_id AND ued.user_id = %s
-                WHERE e.title_id = %s
-            """
-            episode_info = query_mysql(episode_query, (user_id, title_id))
-            result["episodes"] = [
-                {
-                    "episode_id": episode[0],
-                    "episode_name": episode[1],
-                    "watch_count": episode[2]
-                }
-                for episode in episode_info
-            ]
-        return result
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching updated data: {str(e)}")
-
-
 def get_backdrop_count(title_id: int):
     # Path base
     base_path = "/fastapi-media/title"
@@ -1280,9 +1241,6 @@ async def update_episode_watch_count(episode_id: int, data: dict):
         conn.close()
 
         return {"message": "Episode watch count updated!"}
-
-        # updated_data = get_updated_user_title_data(user_id, title_id)
-        # return {"message": "Episode watch count updated!", "updated_data": updated_data}
 
     except HTTPException as e:
         raise e
@@ -1867,109 +1825,134 @@ async def watch_list_search(
     title_category: str = Query(..., regex="^(movie|tv)$"),
     title_name: str = Query(None),
 ):
-    # Validate the session key and retrieve the user ID
-    user_id = validate_session_key(session_key, False)
+    async with aiomysql_conn_get() as conn:
+        # Validate the session key and retrieve the user ID
+        user_id = await validate_session_key_conn(conn, session_key, guest_lock=False)
 
-    # Fetch search results from cache or TMDB API
-    if title_name:
+
+        # Fetch search results from cache or TMDB API
+        if not title_name:
+            raise HTTPException(status_code=400, detail="Title name is required.")
+
         title_lower = title_name.lower()
 
         # Try to get from Redis cache first
         search_results = await get_from_cache(title_lower)
         if search_results is None:
-            search_results = query_tmdb(
+            found_from_cache = False
+            search_results = await query_tmdb(
                 f"/search/{title_category}",
                 {"query": title_name, "include_adult": False}
             )
             # Store results in Redis cache
             await add_to_cache(title_lower, search_results, timedelta(weeks=1))
         else:
+            found_from_cache = True
             print(f"Found \"{title_lower}\" from redis. Using it instead of querying TMDB.")
-    else:
-        raise HTTPException(status_code=400, detail="Title name is required.")
 
-    # Retrieve genre mappings from the database
-    genre_query = "SELECT tmdb_genre_id, genre_name FROM genres"
-    genre_data = query_mysql(genre_query, ())
-    if not genre_data:
-        raise HTTPException(status_code=500, detail="Genres not found in the database.")
-    genre_dict = {genre[0]: genre[1] for genre in genre_data}
+        # Retrieve genre mappings from the database
+        genre_query = "SELECT tmdb_genre_id, genre_name FROM genres"
+        genre_data = await aiomysql_conn_execute(conn, genre_query, use_dictionary=False)
+        if not genre_data:
+            raise HTTPException(status_code=500, detail="Genres not found in the database.")
+        genre_dict = {genre[0]: genre[1] for genre in genre_data}
 
-    # Get the TMDB IDs from search results
-    tmdb_ids = [result.get('id') for result in search_results.get('results', [])]
+        # Get the TMDB IDs from search results
+        tmdb_ids = [result.get('id') for result in search_results.get('results', [])]
 
-    # Fetch watchlist details (title_id) for the user
-    if tmdb_ids:
-        placeholders = ', '.join(['%s'] * len(tmdb_ids))
+        # Fetch watchlist details (title_id) for the user
+        if tmdb_ids:
+            placeholders = ', '.join(['%s'] * len(tmdb_ids))
 
-        # Query to get title_id based on tmdb_id from the titles table
-        title_id_query = f"""
-            SELECT tmdb_id, title_id
-            FROM titles
-            WHERE tmdb_id IN ({placeholders})
-        """
-        title_id_data = query_mysql(title_id_query, (*tmdb_ids,))
-        title_id_dict = {row[0]: row[1] for row in title_id_data}
+            # Query to get title_id based on tmdb_id from the titles table
+            title_id_query = f"""
+                SELECT tmdb_id, title_id
+                FROM titles
+                WHERE tmdb_id IN ({placeholders})
+            """
+            title_id_data = await aiomysql_conn_execute(conn, title_id_query, (*tmdb_ids,), use_dictionary=False)
+            title_id_dict = {row[0]: row[1] for row in title_id_data}
 
-        # Query to get user's watchlist details
-        watchlist_query = f"""
-            SELECT t.tmdb_id, t.title_id
-            FROM user_title_details utd
-            JOIN titles t ON utd.title_id = t.title_id
-            WHERE utd.user_id = %s AND t.tmdb_id IN ({placeholders})
-        """
-        watchlist_data = query_mysql(watchlist_query, (user_id, *tmdb_ids))
-        watchlist_dict = {row[0]: row[1] for row in watchlist_data}
-    else:
-        title_id_dict = {}
-        watchlist_dict = {}
+            # Query to get user's watchlist details
+            watchlist_query = f"""
+                SELECT t.tmdb_id, t.title_id
+                FROM user_title_details utd
+                JOIN titles t ON utd.title_id = t.title_id
+                WHERE utd.user_id = %s AND t.tmdb_id IN ({placeholders})
+            """
+            watchlist_data = await aiomysql_conn_execute(conn, watchlist_query, (user_id, *tmdb_ids), use_dictionary=False)
+            watchlist_dict = {row[0]: row[1] for row in watchlist_data}
+        else:
+            title_id_dict = {}
+            watchlist_dict = {}
 
-    # Process search results: add genre names, watchlist status, and title_id
-    for result in search_results.get('results', []):
-        result['genres'] = [genre_dict.get(genre_id, "Unknown") for genre_id in result.get('genre_ids', [])]
-        tmdb_id = result.get('id')
-        result['title_id'] = title_id_dict.get(tmdb_id)
-        result['in_watch_list'] = tmdb_id in watchlist_dict
+        # Process search results: add genre names, watchlist status, and title_id
+        for result in search_results.get('results', []):
+            result['genres'] = [genre_dict.get(genre_id, "Unknown") for genre_id in result.get('genre_ids', [])]
+            tmdb_id = result.get('id')
+            result['title_id'] = title_id_dict.get(tmdb_id)
+            result['in_watch_list'] = tmdb_id in watchlist_dict
 
-    return search_results
+        return {
+            'result': search_results,
+            'used_cache': found_from_cache
+        }
 
 
 # Used to manually update the genres if they change etc. In the past was ran always on start, but since it ran on all 4 workers the feature was removed. Basically only used if I were to wipe the whole db.
+
+# DO NOT call if not necessary. Have not been recently tested and will cause unnescary problems
 @router.put("/genres")
-def update_genres():
-    # Fetch movie genres
-    movie_genres = query_tmdb("/genre/movie/list", {})
-    if movie_genres:
-        for genre in movie_genres.get("genres", []):
-            genre_id = genre.get("id")
-            genre_name = genre.get("name")
-            # Check if genre exists in the database
-            existing_genre = query_mysql("SELECT * FROM genres WHERE tmdb_genre_id = %s", (genre_id,))
-            if not existing_genre:
-                # Insert new genre
-                query_mysql("INSERT INTO genres (tmdb_genre_id, genre_name) VALUES (%s, %s)", (genre_id, genre_name))
-            else:
-                # Update genre if name changes
-                query_mysql("UPDATE genres SET genre_name = %s WHERE tmdb_genre_id = %s", (genre_name, genre_id))
-        print("Movie genres stored!")
+async def update_genres():
+    async with aiomysql_conn_get() as conn:
 
-    # Fetch TV genres
-    tv_genres = query_tmdb("/genre/tv/list", {})
-    if tv_genres:
-        for genre in tv_genres.get("genres", []):
-            genre_id = genre.get("id")
-            genre_name = genre.get("name")
-            # Check if genre exists in the database
-            existing_genre = query_mysql("SELECT * FROM genres WHERE tmdb_genre_id = %s", (genre_id,))
-            if not existing_genre:
-                # Insert new genre
-                query_mysql("INSERT INTO genres (tmdb_genre_id, genre_name) VALUES (%s, %s)", (genre_id, genre_name))
-            else:
-                # Update genre if name changes
-                query_mysql("UPDATE genres SET genre_name = %s WHERE tmdb_genre_id = %s", (genre_name, genre_id))
-        print("TV genres stored!")
+        # Fetch movie genres
+        movie_genres = await query_tmdb("/genre/movie/list", {})
+        if movie_genres:
+            for genre in movie_genres.get("genres", []):
 
-    return {"Result": "Genres updated!",}
+                genre_id = genre.get("id")
+                genre_name = genre.get("name")
+                
+                # Check if genre exists in the database
+                query = "SELECT * FROM genres WHERE tmdb_genre_id = %s"
+                existing_genre = await aiomysql_conn_execute(conn, query, (genre_id,), use_dictionary=False)
+
+                if not existing_genre:
+                    # Insert new genre
+                    query = "INSERT INTO genres (tmdb_genre_id, genre_name) VALUES (%s, %s)"
+                    await aiomysql_conn_execute(conn, query, (genre_id, genre_name))
+
+                else:
+                    # Update genre if name changes
+                    query = "UPDATE genres SET genre_name = %s WHERE tmdb_genre_id = %s"
+                    await aiomysql_conn_execute(conn, query, (genre_name, genre_id))
+
+            print("Movie genres stored!")
+
+        # Fetch TV genres
+        tv_genres = query_tmdb("/genre/tv/list", {})
+        if tv_genres:
+            for genre in tv_genres.get("genres", []):
+                genre_id = genre.get("id")
+                genre_name = genre.get("name")
+                # Check if genre exists in the database
+                query = "SELECT * FROM genres WHERE tmdb_genre_id = %s"
+                existing_genre = await aiomysql_conn_execute(conn, query, (genre_id,), use_dictionary=False)
+                
+                if not existing_genre:
+                    # Insert new genre
+                    query = "INSERT INTO genres (tmdb_genre_id, genre_name) VALUES (%s, %s)"
+                    await aiomysql_conn_execute(conn, query, (genre_id, genre_name))
+
+                else:
+                    # Update genre if name changes
+                    query = "UPDATE genres SET genre_name = %s WHERE tmdb_genre_id = %s"
+                    await aiomysql_conn_execute(conn, query, (genre_name, genre_id))
+
+            print("TV genres stored!")
+
+        return {"Result": "Genres updated!",}
 
 
 

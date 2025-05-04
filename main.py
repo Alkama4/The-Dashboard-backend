@@ -12,7 +12,7 @@ from routers.media import router as media_router
 from routers.server import router as server_router 
 from routers.spendings import router as spendings_router 
 from routers.watch_list import router as watch_list_router 
-from utils import redis_client, aiomysql_execute
+from utils import redis_client
 
 # Create fastAPI instance and set CORS middleware
 # Could limit the addresses but works fine as is, since only hosted on LAN.
