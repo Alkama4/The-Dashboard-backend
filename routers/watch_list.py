@@ -9,7 +9,7 @@ import httpx
 import json
 
 # Internal imports
-from utils import query_mysql, query_tmdb, query_omdb, download_image, validate_session_key, add_to_cache, fetch_user_settings, add_to_cache, get_from_cache, aiomysql_connect, aiomysql_conn_execute, validate_session_key_conn, get_aiomysql_conn
+from utils import query_mysql, query_tmdb, query_omdb, download_image, validate_session_key, add_to_cache, fetch_user_settings, add_to_cache, get_from_cache, aiomysql_connect, aiomysql_conn_execute, validate_session_key_conn, aiomysql_conn_get
 from custom_values import custom_combined_links
 
 # Create the router object for this module
@@ -1032,7 +1032,7 @@ async def check_collection_ownership(conn, collection_id: int, user_id: int):
 # Allows both title_id and tmdb_id, while preferring title_id
 @router.post("/titles")
 async def add_user_title(data: dict):
-    async with get_aiomysql_conn() as conn:
+    async with aiomysql_conn_get() as conn:
         user_id = await validate_session_key_conn(conn, data.get("session_key"))
 
         title_id = data.get("title_id")
@@ -1107,7 +1107,7 @@ async def remove_user_title(title_id: int, data: dict):
 
 @router.put("/titles/{title_id}")
 async def update_title(title_id: int, data: dict):
-    async with get_aiomysql_conn() as conn:
+    async with aiomysql_conn_get() as conn:
 
         title_type = data.get("title_type")
 
@@ -1190,7 +1190,7 @@ async def toggle_title_favourite(title_id: int, data: dict):
 
 @router.put("/titles/{title_id}/watch_count")
 async def update_title_watch_count(title_id: int, data: dict):
-    async with get_aiomysql_conn() as conn:
+    async with aiomysql_conn_get() as conn:
         user_id = await validate_session_key_conn(conn, data.get("session_key"))
 
         watch_count = data.get("watch_count")

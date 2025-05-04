@@ -28,9 +28,9 @@ async def aiomysql_connect():
     )
 
 
-# Used in "async with get_aiomysql_conn() as conn:" to avoid having to always close the conn
+# Used in "async with aiomysql_conn_get() as conn:" to avoid having to always close the conn
 @asynccontextmanager
-async def get_aiomysql_conn():
+async def aiomysql_conn_get():
     conn = await aiomysql_connect()
     try:
         yield conn
