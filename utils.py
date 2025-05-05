@@ -2,7 +2,6 @@
 import asyncio
 import redis.asyncio as redis
 import os
-import mysql.connector
 import httpx
 from fastapi import HTTPException
 from datetime import timedelta
@@ -16,6 +15,9 @@ semaphore = asyncio.Semaphore(5)
 # Set up aioredis client
 redis_client = redis.from_url(os.getenv("REDIS_PATH", "redis://127.0.0.1:6379"), decode_responses=True)
 
+
+
+# ############## AIOMYSQL ##############
 
 # Establishes an asynchronous connection to the MySQL database
 # Do not use this to connect, instead use the "aiomysql_conn_get" to use as the connection
@@ -40,7 +42,7 @@ async def aiomysql_conn_get():
 
 
 # Execute a MySQL query and return result
-async def aiomysql_conn_execute(
+async def query_aiomysql(
     conn,
     query: str,
     params: tuple = (),
@@ -67,23 +69,8 @@ async def aiomysql_conn_execute(
         return await cursor.fetchall()
 
 
-# Executes a single MySQL query and returns the result as a list of dictionaries.
-# Suitable for single queries. For multiple queries, use the `conn` method directly.
-async def aiomysql_execute(query: str, params: tuple = ()) -> list:
-    conn = await aiomysql_connect()
-    try:
-        return await aiomysql_conn_execute(conn, query, params)
-    except aiomysql.MySQLError as e:
-        detail = f"MySQL error: {e}"
-        print(detail)
-        raise HTTPException(status_code=500, detail=detail)
-    except Exception as e:
-        detail = f"Unknown error with aiomysql: {e}"
-        print(detail)
-        raise HTTPException(status_code=500, detail=detail)
-    finally:
-        conn.close()
 
+# ############## CACHE ##############
 
 # Helper function to store to redis cache
 async def add_to_cache(key: str, data: dict, timedelta: timedelta):
@@ -99,6 +86,9 @@ async def get_from_cache(key: str) -> dict:
         return json.loads(data)
     return None
 
+
+
+# ############## EXTERNAL SOURCES ##############
 
 # Function to query the TMDB servers
 async def query_tmdb(endpoint: str, params: dict = {}):
@@ -155,13 +145,16 @@ async def download_image(image_url: str, image_save_path: str, replace = False):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+
+# ############## OFTEN USED QUERIES ##############
+
 # Used to validate the sesion key
 async def validate_session_key_conn(conn, session_key=None, guest_lock=True):
     if session_key != None and session_key != '' and session_key != 'null':
 
         # Validate the session and fetch user_id
         session_query = "SELECT user_id FROM sessions WHERE session_id = %s AND expires_at > NOW()"
-        session_result = await aiomysql_conn_execute(conn, session_query, (session_key,), use_dictionary=False)
+        session_result = await query_aiomysql(conn, session_query, (session_key,), use_dictionary=False)
 
         if not session_result:
             raise HTTPException(status_code=403, detail="Invalid or expired session key.")
@@ -178,9 +171,12 @@ async def validate_session_key_conn(conn, session_key=None, guest_lock=True):
 # Used to get settings values e.g. for title limit
 async def fetch_user_settings(conn, user_id: int, setting_name: str):
     query = f"SELECT {setting_name} FROM user_settings WHERE user_id = %s"
-    result = await aiomysql_conn_execute(conn, query, (user_id,), use_dictionary=True)
+    result = await query_aiomysql(conn, query, (user_id,), use_dictionary=True)
     return result[0][setting_name] if result else None
 
+
+
+# ############## GENERIC HELPER METHODS ##############
 
 # Used to format a time difference, created for backups
 def format_time_difference(delta):

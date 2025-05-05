@@ -8,7 +8,7 @@ import pandas as pd
 import calendar
 
 # Internal imports
-from utils import validate_session_key_conn, aiomysql_conn_get, aiomysql_conn_execute, fetch_user_settings
+from utils import validate_session_key_conn, aiomysql_conn_get, query_aiomysql, fetch_user_settings
 
 # Create the router object for this module
 router = APIRouter()
@@ -140,7 +140,7 @@ async def get_transactions(
         params.extend([limit, offset * limit])
 
         # Fetch transaction IDs
-        transaction_ids = await aiomysql_conn_execute(conn, transaction_query, params, use_dictionary=False)
+        transaction_ids = await query_aiomysql(conn, transaction_query, params, use_dictionary=False)
         if not transaction_ids:
             return {"transactions": []}
 
@@ -157,7 +157,7 @@ async def get_transactions(
             ORDER BY FIELD(t.transaction_id, {','.join(['%s'] * len(transaction_ids_list))})
         """
         items_params = transaction_ids_list + transaction_ids_list
-        transactions_items = await aiomysql_conn_execute(conn, items_query, items_params, use_dictionary=False)
+        transactions_items = await query_aiomysql(conn, items_query, items_params, use_dictionary=False)
 
         # Query for the total amount of transactions that match our filters and compare to the limit
         total_query = f"""
@@ -169,7 +169,7 @@ async def get_transactions(
         # Make a copy of the params list and remove the limit and offset
         params_for_total = params[:-2]
         # Query and calculate result
-        total_count = await aiomysql_conn_execute(conn, total_query, params_for_total, use_dictionary=False)
+        total_count = await query_aiomysql(conn, total_query, params_for_total, use_dictionary=False)
         hasMore = total_count[0][0] > (limit + offset)
 
         # Organize and process transactions
@@ -226,7 +226,7 @@ async def new_transaction(data: dict):
             INSERT INTO transactions (direction, date, counterparty, notes, user_id)
             VALUES (%s, %s, %s, %s, %s)
         """
-        transaction_id = await aiomysql_conn_execute(conn, transaction_query, (direction, date, counterparty, notes, user_id), return_lastrowid=True, use_dictionary=False)
+        transaction_id = await query_aiomysql(conn, transaction_query, (direction, date, counterparty, notes, user_id), return_lastrowid=True, use_dictionary=False)
 
         if not transaction_id:
             raise HTTPException(status_code=500, detail="Failed to retrieve transaction ID.")
@@ -243,7 +243,7 @@ async def new_transaction(data: dict):
                 "INSERT INTO transaction_items (transactionID, category, amount) "
                 "VALUES (%s, %s, %s)"
             )
-            await aiomysql_conn_execute(conn, item_query, (transaction_id, category_name, amount))
+            await query_aiomysql(conn, item_query, (transaction_id, category_name, amount))
 
         return {"message": "Transaction created successfully!"}
 
@@ -268,7 +268,7 @@ async def edit_transaction(transaction_id: int, data: dict):
 
         # Check if the transaction exists and belongs to the user
         transaction_query = "SELECT * FROM transactions WHERE transaction_id = %s AND user_id = %s"
-        transaction_result = await aiomysql_conn_execute(conn, transaction_query, (transaction_id, user_id), use_dictionary=False)
+        transaction_result = await query_aiomysql(conn, transaction_query, (transaction_id, user_id), use_dictionary=False)
         if not transaction_result:
             raise HTTPException(status_code=403, detail="Transaction not found or not owned by the user.")
 
@@ -277,11 +277,11 @@ async def edit_transaction(transaction_id: int, data: dict):
             "UPDATE transactions SET direction = %s, date = %s, counterparty = %s, notes = %s "
             "WHERE transaction_id = %s AND user_id = %s"
         )
-        await aiomysql_conn_execute(conn, update_transaction_query, (direction, date, counterparty, notes, transaction_id, user_id))
+        await query_aiomysql(conn, update_transaction_query, (direction, date, counterparty, notes, transaction_id, user_id))
 
         # Delete existing transaction items
         delete_items_query = "DELETE FROM transaction_items WHERE transactionID = %s"
-        await aiomysql_conn_execute(conn, delete_items_query, (transaction_id,))
+        await query_aiomysql(conn, delete_items_query, (transaction_id,))
 
         # Insert new categories into the transaction_items table
         for category in categories:
@@ -295,7 +295,7 @@ async def edit_transaction(transaction_id: int, data: dict):
                 "INSERT INTO transaction_items (transactionID, category, amount) "
                 "VALUES (%s, %s, %s)"
             )
-            await aiomysql_conn_execute(conn, item_query, (transaction_id, category_name, amount))
+            await query_aiomysql(conn, item_query, (transaction_id, category_name, amount))
 
         return {"message": "Transaction edited successfully!"}
 
@@ -313,13 +313,13 @@ async def delete_transaction(transaction_id: int, data: dict):
 
         # Check if the transaction exists and belongs to the user
         transaction_query = "SELECT * FROM transactions WHERE transaction_id = %s AND user_id = %s"
-        transaction_result = await aiomysql_conn_execute(conn, transaction_query, (transaction_id, user_id))
+        transaction_result = await query_aiomysql(conn, transaction_query, (transaction_id, user_id))
         if not transaction_result:
             raise HTTPException(status_code=403, detail="Transaction not found or not owned by the user.")
 
         # Delete the transaction
         delete_transaction_query = "DELETE FROM transactions WHERE transaction_id = %s AND user_id = %s"
-        await aiomysql_conn_execute(conn, delete_transaction_query, (transaction_id, user_id))
+        await query_aiomysql(conn, delete_transaction_query, (transaction_id, user_id))
 
         return {"message": "Transaction deleted successfully!"}
 
@@ -341,7 +341,7 @@ async def get_options(
             GROUP BY counterparty, direction
             ORDER BY COUNT(*) DESC;
         """
-        counterpartyValuesObject = await aiomysql_conn_execute(conn, counterparty_query, (user_id,), use_dictionary=False)
+        counterpartyValuesObject = await query_aiomysql(conn, counterparty_query, (user_id,), use_dictionary=False)
         # Split into expense and income arrays based on the direction
         counterpartyExpense = [row[0] for row in counterpartyValuesObject if row[1] == "expense"]
         counterpartyIncome = [row[0] for row in counterpartyValuesObject if row[1] == "income"]
@@ -355,7 +355,7 @@ async def get_options(
             GROUP BY ti.category, t.direction
             ORDER BY COUNT(*) DESC;
         """
-        categoryValuesObject = await aiomysql_conn_execute(conn, category_query, (user_id,), use_dictionary=False)
+        categoryValuesObject = await query_aiomysql(conn, category_query, (user_id,), use_dictionary=False)
         # Split into expense and income arrays based on the direction
         categoryExpense = [row[0] for row in categoryValuesObject if row[1] == "expense"]
         categoryIncome = [row[0] for row in categoryValuesObject if row[1] == "income"]
@@ -381,7 +381,7 @@ async def get_filters(
             GROUP BY counterparty, direction
             ORDER BY COUNT(*) DESC;
         """
-        counterpartyValuesObject = await aiomysql_conn_execute(conn, counterparty_query, (user_id,), use_dictionary=False)
+        counterpartyValuesObject = await query_aiomysql(conn, counterparty_query, (user_id,), use_dictionary=False)
         # Split into expense and income arrays based on the direction
         counterpartyExpense = [row[0] for row in counterpartyValuesObject if row[1] == "expense"]
         counterpartyIncome = [row[0] for row in counterpartyValuesObject if row[1] == "income"]
@@ -395,7 +395,7 @@ async def get_filters(
             GROUP BY ti.category, t.direction
             ORDER BY COUNT(*) DESC;
         """
-        categoryValuesObject = await aiomysql_conn_execute(conn, category_query, (user_id,), use_dictionary=False)
+        categoryValuesObject = await query_aiomysql(conn, category_query, (user_id,), use_dictionary=False)
         # Split into expense and income arrays based on the direction
         categoryExpense = [row[0] for row in categoryValuesObject if row[1] == "expense"]
         categoryIncome = [row[0] for row in categoryValuesObject if row[1] == "income"]
@@ -408,7 +408,7 @@ async def get_filters(
             FROM transactions
             WHERE user_id = %s;
         """
-        dateValues = await aiomysql_conn_execute(conn, date_query, (user_id,), use_dictionary=False)
+        dateValues = await query_aiomysql(conn, date_query, (user_id,), use_dictionary=False)
         minDate = dateValues[0][0]
         maxDate = dateValues[0][1]
 
@@ -427,7 +427,7 @@ async def get_filters(
                 GROUP BY t.transaction_id
             ) AS transaction_totals;
         """
-        amountValues = await aiomysql_conn_execute(conn, amount_query, (user_id,), use_dictionary=False)
+        amountValues = await query_aiomysql(conn, amount_query, (user_id,), use_dictionary=False)
         minAmount = amountValues[0][1]
         maxAmount = amountValues[0][0]
 
@@ -477,7 +477,7 @@ async def analytics_get_general_stats(
             WHERE 
                 t.user_id = %s
         """
-        general_stats_result = await aiomysql_conn_execute(conn, general_stats_query, (user_id,), use_dictionary=False)
+        general_stats_result = await query_aiomysql(conn, general_stats_query, (user_id,), use_dictionary=False)
 
         # Prepare the response
         if general_stats_result:
@@ -552,7 +552,7 @@ async def analytics_get_last_timespan_stats(
             WHERE 
                 t.user_id = %s AND {date_condition}
         """
-        stats_result = await aiomysql_conn_execute(conn, stats_query, (user_id,), use_dictionary=False)
+        stats_result = await query_aiomysql(conn, stats_query, (user_id,), use_dictionary=False)
 
         # Query for the expenses and incomes ratio
         ratio_query = f"""
@@ -566,7 +566,7 @@ async def analytics_get_last_timespan_stats(
             WHERE 
                 t.user_id = %s AND {date_condition};
         """
-        ratio_result = await aiomysql_conn_execute(conn, ratio_query, (user_id,), use_dictionary=False)
+        ratio_result = await query_aiomysql(conn, ratio_query, (user_id,), use_dictionary=False)
 
         # Query for the originally just 5 most common expense categories
         # category_query = f"""
@@ -603,7 +603,7 @@ async def analytics_get_last_timespan_stats(
                 total_amount DESC;
         """
 
-        expensive_result = await aiomysql_conn_execute(conn, category_avg_by_month_query, (user_id,), use_dictionary=False)
+        expensive_result = await query_aiomysql(conn, category_avg_by_month_query, (user_id,), use_dictionary=False)
 
         # Prepare the response
         if stats_result:
@@ -678,7 +678,7 @@ async def get_charts(
             initial_balance_query = """
                 SELECT chart_balance_initial_value FROM user_settings WHERE user_id = %s
             """
-            initial_balance_result = await aiomysql_conn_execute(conn, initial_balance_query, (user_id,), use_dictionary=False)
+            initial_balance_result = await query_aiomysql(conn, initial_balance_query, (user_id,), use_dictionary=False)
             initial_balance = initial_balance_result[0][0] if initial_balance_result else 0
 
             # Query for the balance over time
@@ -704,7 +704,7 @@ async def get_charts(
                 JOIN 
                     (SELECT @running_balance := CAST(%s AS DECIMAL(10, 2))) r;
             """
-            balance_result = await aiomysql_conn_execute(conn, balance_query, (user_id, initial_balance), use_dictionary=False)
+            balance_result = await query_aiomysql(conn, balance_query, (user_id, initial_balance), use_dictionary=False)
 
             # If there are results, fill in the gaps
             if balance_result:
@@ -757,7 +757,7 @@ async def get_charts(
                 ORDER BY 
                     month;
             """
-            monthly_sum_result = await aiomysql_conn_execute(conn, monthly_sum_query, (user_id,), use_dictionary=False)
+            monthly_sum_result = await query_aiomysql(conn, monthly_sum_query, (user_id,), use_dictionary=False)
 
             if monthly_sum_result:
                 formatted_result = [
@@ -778,7 +778,7 @@ async def get_charts(
                 SELECT MIN(DATE_FORMAT(date, '%%Y-%%m')), MAX(DATE_FORMAT(date, '%%Y-%%m'))
                 FROM transactions WHERE user_id = %s;
             """
-            date_range_result = await aiomysql_conn_execute(conn, date_range_query, (user_id,), use_dictionary=False)
+            date_range_result = await query_aiomysql(conn, date_range_query, (user_id,), use_dictionary=False)
             first_month, last_month = date_range_result[0] if date_range_result else (None, None)
 
             if not first_month or not last_month:
@@ -795,7 +795,7 @@ async def get_charts(
                 GROUP BY month, ti.category
                 ORDER BY month, ti.category;
             """
-            results = await aiomysql_conn_execute(conn, query, (user_id, direction), use_dictionary=False)
+            results = await query_aiomysql(conn, query, (user_id, direction), use_dictionary=False)
 
             if not results:
                 return {"monthlyCategoryExpenses": []}

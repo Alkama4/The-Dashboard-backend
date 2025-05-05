@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from fastapi import HTTPException, Query, APIRouter
 
 # Internal imports
-from utils import aiomysql_conn_get, aiomysql_conn_execute, validate_session_key_conn
+from utils import aiomysql_conn_get, query_aiomysql, validate_session_key_conn
 
 # Create the router object for this module
 router = APIRouter()
@@ -30,7 +30,7 @@ async def login(data: dict):
                     WHERE session_id = %s AND expires_at > NOW()
                 );
             """
-            result = await aiomysql_conn_execute(conn, query, (previous_session_key,), use_dictionary=False)
+            result = await query_aiomysql(conn, query, (previous_session_key,), use_dictionary=False)
             if result:
                 logged_in_username = result[0][0]  # Extract the username from the query result
                 if logged_in_username.lower() == username.lower():
@@ -42,7 +42,7 @@ async def login(data: dict):
 
         # Check if the user exists in the database and query the password
         query = "SELECT user_id, password FROM users WHERE username = %s"
-        user = await aiomysql_conn_execute(conn, query, (username,), use_dictionary=False)
+        user = await query_aiomysql(conn, query, (username,), use_dictionary=False)
         
         # Basic password check (plaintext)
         if not user or user[0][1] != password:  
@@ -63,17 +63,17 @@ async def login(data: dict):
             INSERT INTO sessions (session_id, user_id, expires_at) 
             VALUES (%s, %s, %s)
         """
-        await aiomysql_conn_execute(conn, insert_query, (session_key, user_id, expiration_time))
+        await query_aiomysql(conn, insert_query, (session_key, user_id, expiration_time))
 
         # Lastly delete expired sessions from the sessions table
         expired_query = """
             DELETE FROM sessions WHERE expires_at <= NOW();
         """
-        await aiomysql_conn_execute(conn, expired_query)
+        await query_aiomysql(conn, expired_query)
 
         # Return the session key to the client
         return {
-            "loginStatus": "success",
+            "message": "Logged in successfully!",
             "sessionKey": session_key,
             "username": username,
         }
@@ -89,9 +89,9 @@ async def logout(data: dict):
 
         # Delete the session key from the sessions table
         query = "DELETE FROM sessions WHERE session_id = %s"
-        await aiomysql_conn_execute(conn, query, (session_key,))
+        await query_aiomysql(conn, query, (session_key,))
         return {
-            "logOutSuccess": True,
+            "message": "Logged out successfully!",
         }
 
 
@@ -121,7 +121,7 @@ async def create_account(data: dict):
             FROM users
             WHERE username = %s
         """
-        check_for_same_name_result = await aiomysql_conn_execute(conn, check_for_same_name_query, (username,), use_dictionary=False)
+        check_for_same_name_result = await query_aiomysql(conn, check_for_same_name_query, (username,), use_dictionary=False)
 
         if check_for_same_name_result:
             raise HTTPException(status_code=400, detail="The username is already taken.")
@@ -133,7 +133,7 @@ async def create_account(data: dict):
                 VALUES (%s, %s);
             """
             create_user_params = (username, password)
-            user_id = await aiomysql_conn_execute(conn, create_user_query, create_user_params, return_lastrowid=True)
+            user_id = await query_aiomysql(conn, create_user_query, create_user_params, return_lastrowid=True)
             
             # Initialize user settings
             create_settings_query = """
@@ -141,7 +141,7 @@ async def create_account(data: dict):
                 VALUES (%s);
             """
             create_settings_params = (user_id,)
-            await aiomysql_conn_execute(conn, create_settings_query, create_settings_params)
+            await query_aiomysql(conn, create_settings_query, create_settings_params)
 
             return {"message": "Account created successfully!"}
         
@@ -163,7 +163,7 @@ async def get_session_details(
                 WHERE session_id = %s AND expires_at > NOW()
             );
         """
-        result = await aiomysql_conn_execute(conn, query, (session_key,), use_dictionary=False)
+        result = await query_aiomysql(conn, query, (session_key,), use_dictionary=False)
 
         if result:
             return {
@@ -193,7 +193,7 @@ async def delete_account(data: dict):
                 WHERE user_id = %s AND password = %s;
             """
             delete_user_params = (user_id, password)
-            affected_rows = await aiomysql_conn_execute(conn, delete_user_query, delete_user_params, return_rowcount=True)
+            affected_rows = await query_aiomysql(conn, delete_user_query, delete_user_params, return_rowcount=True)
 
             if affected_rows == 0:
                 raise HTTPException(status_code=400, detail="Incorrect password.")
@@ -223,7 +223,7 @@ async def change_password(data: dict):
                 WHERE user_id = %s AND password = %s;
             """
             change_password_params = (password_new, user_id, password_old)
-            affected_rows = await aiomysql_conn_execute(conn, change_password_query, change_password_params, return_rowcount=True)
+            affected_rows = await query_aiomysql(conn, change_password_query, change_password_params, return_rowcount=True)
             if affected_rows == 0:
                 raise HTTPException(status_code=400, detail="Invalid password!")
 
@@ -252,7 +252,7 @@ async def get_settings(session_key: str):
             FROM user_settings
             WHERE user_id = %s;
         """
-        result = await aiomysql_conn_execute(conn, query, (user_id,), use_dictionary=False)
+        result = await query_aiomysql(conn, query, (user_id,), use_dictionary=False)
         setting_values = result[0]
 
         return {setting: setting_values[i] for i, setting in enumerate(VALID_SETTINGS)}
@@ -267,7 +267,7 @@ async def update_settings(data: dict):
 
         updated_settings = data.get("updated_settings")
         if not updated_settings:
-            return {"message": "No settings to update"}
+            return {"message": "No settings to update."}
 
         # Prepare the SET clause and values for the update query
         set_clause = []
@@ -284,7 +284,7 @@ async def update_settings(data: dict):
 
         # If there are no valid settings to update
         if not set_clause:
-            return {"message": "No valid settings to update"}
+            return {"message": "No valid settings to update."}
 
         # Construct the query
         # Need to use join since the %s can't be used for column names
@@ -298,6 +298,6 @@ async def update_settings(data: dict):
         values.append(user_id)
 
         # Execute the query
-        await aiomysql_conn_execute(conn, query, tuple(values))
+        await query_aiomysql(conn, query, tuple(values))
 
-        return {"message": "Settings updated successfully"}
+        return {"message": "Settings updated successfully!"}

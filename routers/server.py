@@ -6,7 +6,7 @@ import psutil
 from fastapi import HTTPException, Query, APIRouter
 
 # Internal imports
-from utils import format_time_difference, redis_client, aiomysql_conn_get, aiomysql_conn_execute
+from utils import format_time_difference, redis_client, aiomysql_conn_get, query_aiomysql
 
 # Create the router object for this module
 router = APIRouter()
@@ -313,7 +313,7 @@ async def log_backup(data: dict):
             SET last_success = NOW()
             WHERE backup_name = %s
         """
-        await aiomysql_conn_execute(conn, query, (backup_name,))
+        await query_aiomysql(conn, query, (backup_name,))
         
         return {"message": "Logged successfully"}
 
@@ -335,7 +335,7 @@ async def get_backups():
             FROM backups
         """
         
-        backups = await aiomysql_conn_execute(conn, query, use_dictionary=False)
+        backups = await query_aiomysql(conn, query, use_dictionary=False)
         
         if backups:
             formatted_backups = defaultdict(list)  # Group backups by category
