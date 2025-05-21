@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 from fastapi import HTTPException, Query, APIRouter
 from typing import Literal
 from datetime import timedelta
+from dateutil.relativedelta import relativedelta
 import pandas as pd
 import calendar
 
@@ -505,34 +506,32 @@ async def analytics_get_last_timespan_stats(
         user_id = await validate_session_key_conn(conn, session_key, guest_lock=False)
 
         # Define the date range based on the timespan
-        if timespan == "month":
-            today = date.today()
-            prev_month = today.month - 1 or 12
-            year = today.year if today.month > 1 else today.year - 1
+        today = date.today()
 
-            # Get the number of days in the last month
-            days_in_period = calendar.monthrange(year, prev_month)[1]
-
-            # Calculate weeks (approximating to full weeks)
+        if timespan in {"month", "quarter", "half_year"}:
+            months_back = {"month": 1, "quarter": 3, "half_year": 6}[timespan]
+            start_date = today - relativedelta(months=months_back)
+            days_in_period = (today - start_date).days
             weeks_in_period = days_in_period / 7
+            months_in_period = months_back
+            date_condition = f"t.date > DATE_SUB(CURDATE(), INTERVAL {months_back} MONTH) AND t.date <= CURDATE()"
 
-            # Months are fixed to 1 for this timespan
-            months_in_period = 1
-
-            date_condition = "t.date >= DATE_SUB(CURDATE(), INTERVAL 1 MONTH)"
         elif timespan == "year":
-            # Check for leap year
-            days_in_period = 366 if calendar.isleap(date.today().year) else 365
-
-            # Fixed
+            days_in_period = 366 if calendar.isleap(today.year) else 365
             weeks_in_period = 52
-
-            # Fixed
             months_in_period = 12
-            date_condition = "t.date >= DATE_SUB(CURDATE(), INTERVAL 1 YEAR)"
-        
+            date_condition = "t.date > DATE_SUB(CURDATE(), INTERVAL 1 YEAR) AND t.date <= CURDATE()"
+
+        elif timespan == "ytd":
+            start_of_year = date(today.year, 1, 1)
+            days_in_period = (today - start_of_year).days + 1
+            weeks_in_period = days_in_period / 7
+            months_in_period = today.month
+            date_condition = "t.date BETWEEN DATE_FORMAT(CURDATE(), '%Y-01-01') AND CURDATE()"
+
         else:
             raise HTTPException(status_code=400, detail="Missing or invalid timespan.")
+
 
         # print("Days in period: ")
         # print(days_in_period)
@@ -568,24 +567,6 @@ async def analytics_get_last_timespan_stats(
         """
         ratio_result = await query_aiomysql(conn, ratio_query, (user_id,), use_dictionary=False)
 
-        # Query for the originally just 5 most common expense categories
-        # category_query = f"""
-        #     SELECT 
-        #         ti.category, 
-        #         COUNT(*) AS count 
-        #     FROM 
-        #         transactions t
-        #     JOIN 
-        #         transaction_items ti ON t.transaction_id = ti.transactionID
-        #     WHERE 
-        #         t.user_id = %s AND t.direction = 'expense' AND {date_condition}
-        #     GROUP BY 
-        #         ti.category
-        #     ORDER BY 
-        #         count DESC;
-        # """
-        # category_result = query_mysql(category_query, (user_id,))
-
         # Query for the originally just 5 most expensive expense categories by total sum
         category_avg_by_month_query = f"""
             SELECT 
@@ -619,11 +600,6 @@ async def analytics_get_last_timespan_stats(
             total_expenses = float(ratio_result[0][1]) if ratio_result and ratio_result[0][1] is not None else 0
             income_expense_ratio = (total_incomes / total_expenses) if total_expenses else None
             net_total = total_incomes - total_expenses
-
-            # Prepare the most common categories
-            # common_categories = [
-            #     {"category": row[0], "count": row[1]} for row in category_result
-            # ] if category_result else []
 
             # Prepare avg by category
             if timespan == "month":
