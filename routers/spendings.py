@@ -4,9 +4,7 @@ from zoneinfo import ZoneInfo
 from fastapi import HTTPException, Query, APIRouter
 from typing import Literal
 from datetime import timedelta
-from dateutil.relativedelta import relativedelta
 import pandas as pd
-import calendar
 
 # Internal imports
 from utils import validate_session_key_conn, aiomysql_conn_get, query_aiomysql, fetch_user_settings
@@ -169,9 +167,8 @@ async def get_transactions(
         """
         # Make a copy of the params list and remove the limit and offset
         params_for_total = params[:-2]
-        # Query and calculate result
-        total_count = await query_aiomysql(conn, total_query, params_for_total, use_dictionary=False)
-        hasMore = total_count[0][0] > (limit + offset)
+        total_count_result = await query_aiomysql(conn, total_query, params_for_total, use_dictionary=False)
+        total_count = total_count_result[0][0]
 
         # Organize and process transactions
         transactions_dict = {}
@@ -197,9 +194,14 @@ async def get_transactions(
         for transaction in transactions_dict.values():
             transaction["amount_sum"] = sum(item["amount"] for item in transaction["categories"])
 
+        returned_count = offset * limit + len(transactions_dict)
+        has_more = returned_count < total_count
+
         return {
             "transactions": list(transactions_dict.values()),
-            "hasMore": hasMore,
+            "has_more": has_more,
+            "total_count": total_count,
+            "returned_count": returned_count,
             "offset": offset,
         }
 
@@ -495,147 +497,178 @@ async def analytics_get_general_stats(
         return {"generalStats": {}}
 
 
-@router.get("/analytics/stats/{timespan}")
-async def analytics_get_last_timespan_stats(
-    timespan: str,
-    session_key: str = Query(None),
+@router.get("/analytics/stats/timespan")
+async def analytics_get_timespan_stats(
+    session_key: str = Query(...),
+    start_date: str = Query(None),
+    end_date: str = Query(None),
 ):
     async with aiomysql_conn_get() as conn:
-        
-        # Validate the session key
         user_id = await validate_session_key_conn(conn, session_key, guest_lock=False)
 
-        # Define the date range based on the timespan
-        today = date.today()
-
-        if timespan in {"month", "quarter", "half_year"}:
-            months_back = {"month": 1, "quarter": 3, "half_year": 6}[timespan]
-            start_date = today - relativedelta(months=months_back)
-            days_in_period = (today - start_date).days
-            weeks_in_period = days_in_period / 7
-            months_in_period = months_back
-            date_condition = f"t.date > DATE_SUB(CURDATE(), INTERVAL {months_back} MONTH) AND t.date <= CURDATE()"
-
-        elif timespan == "year":
-            days_in_period = 366 if calendar.isleap(today.year) else 365
-            weeks_in_period = 52
-            months_in_period = 12
-            date_condition = "t.date > DATE_SUB(CURDATE(), INTERVAL 1 YEAR) AND t.date <= CURDATE()"
-
-        elif timespan == "ytd":
-            start_of_year = date(today.year, 1, 1)
-            days_in_period = (today - start_of_year).days + 1
-            weeks_in_period = days_in_period / 7
-            months_in_period = today.month
-            date_condition = "t.date BETWEEN DATE_FORMAT(CURDATE(), '%Y-01-01') AND CURDATE()"
-
+        # Fetch start_date from DB if not given
+        if not start_date:
+            result = await query_aiomysql(
+                conn,
+                "SELECT MIN(t.date) FROM transactions t WHERE t.user_id = %s",
+                (user_id,),
+                use_dictionary=False
+            )
+            start_date_obj = result[0][0] or date.today()
         else:
-            raise HTTPException(status_code=400, detail="Missing or invalid timespan.")
+            start_date_obj = date.fromisoformat(start_date)
+
+        # Fetch end_date from DB if not given
+        if not end_date:
+            result = await query_aiomysql(
+                conn,
+                "SELECT MAX(t.date) FROM transactions t WHERE t.user_id = %s",
+                (user_id,),
+                use_dictionary=False
+            )
+            end_date_obj = result[0][0] or date.today()
+        else:
+            end_date_obj = date.fromisoformat(end_date)
+
+        if start_date_obj > end_date_obj:
+            raise HTTPException(status_code=400, detail="Start date cannot be after end date.")
+
+        days_in_period = (end_date_obj - start_date_obj).days + 1
+        months_in_period = (end_date_obj.year - start_date_obj.year) * 12 + (end_date_obj.month - start_date_obj.month) + 1
 
 
-        # print("Days in period: ")
-        # print(days_in_period)
-        # print("Weeks in period: ")
-        # print(weeks_in_period)
-        # print("Months in period: ")
-        # print(months_in_period)
+        ###### Single value queries ######
 
-        # Query for total expenses within the timespan
-        stats_query = f"""
+        stats_query = """
             SELECT
                 SUM(CASE WHEN t.direction = 'expense' THEN ti.amount ELSE 0 END) AS total_expenses
-            FROM 
+            FROM
                 transactions t
-            JOIN 
+            JOIN
                 transaction_items ti ON t.transaction_id = ti.transactionID
-            WHERE 
-                t.user_id = %s AND {date_condition}
+            WHERE
+                t.user_id = %s AND t.date >= %s AND t.date <= %s
         """
-        stats_result = await query_aiomysql(conn, stats_query, (user_id,), use_dictionary=False)
+        stats_result = await query_aiomysql(
+            conn, stats_query, (user_id, start_date_obj, end_date_obj), use_dictionary=False
+        )
 
-        # Query for the expenses and incomes ratio
-        ratio_query = f"""
+        ratio_query = """
             SELECT
-                COALESCE(SUM(CASE WHEN t.direction = 'income' THEN ti.amount ELSE 0 END), 0) AS total_incomes,
-                COALESCE(SUM(CASE WHEN t.direction = 'expense' THEN ti.amount ELSE 0 END), 0) AS total_expenses
-            FROM 
+                COALESCE(SUM(CASE WHEN t.direction = 'income' THEN ti.amount ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN t.direction = 'expense' THEN ti.amount ELSE 0 END), 0)
+            FROM
                 transactions t
-            JOIN 
+            JOIN
                 transaction_items ti ON t.transaction_id = ti.transactionID
-            WHERE 
-                t.user_id = %s AND {date_condition};
+            WHERE
+                t.user_id = %s AND t.date >= %s AND t.date <= %s
         """
-        ratio_result = await query_aiomysql(conn, ratio_query, (user_id,), use_dictionary=False)
+        ratio_result = await query_aiomysql(
+            conn, ratio_query, (user_id, start_date_obj, end_date_obj), use_dictionary=False
+        )
 
-        # Query for the originally just 5 most expensive expense categories by total sum
-        category_avg_by_month_query = f"""
-            SELECT 
-                ti.category,
-                SUM(ti.amount) AS total_amount
-            FROM 
-                transactions t
-            JOIN 
-                transaction_items ti ON t.transaction_id = ti.transactionID
-            WHERE 
-                t.user_id = %s AND t.direction = 'expense' AND {date_condition}
-            GROUP BY 
-                ti.category
-            ORDER BY 
-                total_amount DESC;
-        """
+        # Calculate values
+        total_expenses = stats_result[0][0] or 0 if stats_result else 0
+        expenses_avg_day = float(total_expenses) / days_in_period if days_in_period else 0
+        expenses_avg_week = float(total_expenses) / (days_in_period / 7) if days_in_period else 0
+        expenses_avg_month = float(total_expenses) / months_in_period if months_in_period else 0
 
-        expensive_result = await query_aiomysql(conn, category_avg_by_month_query, (user_id,), use_dictionary=False)
+        total_incomes = float(ratio_result[0][0]) if ratio_result[0][0] is not None else 0
+        total_expenses = float(ratio_result[0][1]) if ratio_result[0][1] is not None else 0
+        income_expense_ratio = (total_incomes / total_expenses) if total_expenses != 0 else None
+        net_total = total_incomes - total_expenses
 
-        # Prepare the response
-        if stats_result:
 
-            # Spendings avg timespan
-            total_expenses = stats_result[0][0] or 0
-            spendings_avg_day = float(total_expenses) / days_in_period if days_in_period else 0
-            spendings_avg_week = float(total_expenses) / weeks_in_period if weeks_in_period else 0
-            spendings_avg_month = float(total_expenses) / months_in_period if months_in_period else 0
+        ###### Total sum value queries ######
 
-            # Handle the ratio calculation
-            total_incomes = float(ratio_result[0][0]) if ratio_result and ratio_result[0][0] is not None else 0
-            total_expenses = float(ratio_result[0][1]) if ratio_result and ratio_result[0][1] is not None else 0
-            income_expense_ratio = (total_incomes / total_expenses) if total_expenses else None
-            net_total = total_incomes - total_expenses
+        category_queries = {
+            "expense": """
+                SELECT
+                    ti.category,
+                    SUM(ti.amount) AS total_amount
+                FROM
+                    transactions t
+                JOIN
+                    transaction_items ti ON t.transaction_id = ti.transactionID
+                WHERE
+                    t.user_id = %s AND t.direction = 'expense' AND t.date >= %s AND t.date <= %s
+                GROUP BY
+                    ti.category
+                ORDER BY
+                    total_amount DESC;
+            """,
+            "income": """
+                SELECT
+                    ti.category,
+                    SUM(ti.amount) AS total_amount
+                FROM
+                    transactions t
+                JOIN
+                    transaction_items ti ON t.transaction_id = ti.transactionID
+                WHERE
+                    t.user_id = %s AND t.direction = 'income' AND t.date >= %s AND t.date <= %s
+                GROUP BY
+                    ti.category
+                ORDER BY
+                    total_amount DESC;
+            """
+        }
 
-            # Prepare avg by category
-            if timespan == "month":
-                spendings_avg_month_by_category = [
-                    {"category": row[0], "totalAmount": float(row[1])}
-                    for row in expensive_result
-                ] if expensive_result else []
-            elif timespan == "year":
-                spendings_avg_month_by_category = [
-                    {"category": row[0], "totalAmount": float(row[1] / 12)}
-                    for row in expensive_result
-                ] if expensive_result else []
+        expense_category_result = await query_aiomysql(
+            conn, category_queries["expense"], (user_id, start_date_obj, end_date_obj), use_dictionary=False
+        )
 
-            result = {
-                "spendingsAverageDay": spendings_avg_day,
-                "spendingsAverageWeek": spendings_avg_week,
-                "spendingsAverageMonth": spendings_avg_month,
-                "incomeExpenseRatio": income_expense_ratio,
-                "netTotal": net_total,
-                # "topMostCommonCategories": common_categories,
-                "topMostExpensiveCategories": spendings_avg_month_by_category,
+        income_category_result = await query_aiomysql(
+            conn, category_queries["income"], (user_id, start_date_obj, end_date_obj), use_dictionary=False
+        )
+
+        
+        expenses_total_by_category = [
+            {"category": row[0], "total_amount": float(row[1])} for row in expense_category_result
+        ]
+
+        expenses_avg_month_by_category = [
+            {
+                "category": row["category"],
+                "avg_per_month": row["total_amount"] / months_in_period if months_in_period else 0
             }
-            return {"stats": result}
+            for row in expenses_total_by_category
+        ]
 
-        # Default response if no data
+        incomes_total_by_category = [
+            {"category": row[0], "total_amount": float(row[1])} for row in income_category_result
+        ]
+
+        incomes_avg_month_by_category = [
+            {
+                "category": row["category"],
+                "avg_per_month": row["total_amount"] / months_in_period if months_in_period else 0
+            }
+            for row in incomes_total_by_category
+        ]
+
         return {
+            "timespan": {
+                "start_date": start_date_obj.isoformat(),
+                "end_date": end_date_obj.isoformat(),
+                "days_in_period": days_in_period,
+                "months_in_period": months_in_period,
+            },
             "stats": {
-                "spendingsAverageDay": 0,
-                "spendingsAverageWeek": 0,
-                "spendingsAverageMonth": 0,
-                "incomeExpenseRatio": None,  # Explicitly indicate missing ratio
-                "netTotal": 0,
-                # "topMostCommonCategories": [],
-                "topMostExpensiveCategories": [],
+                "expenses_avg_day": expenses_avg_day,
+                "expenses_avg_week": expenses_avg_week,
+                "expenses_avg_month": expenses_avg_month,
+                "expenses_total": total_expenses,
+                "income_expense_ratio": income_expense_ratio,
+                "net_total": net_total,
+                "expense_categories_avg_month": expenses_avg_month_by_category,
+                "expense_categories_total": expenses_total_by_category,
+                "income_categories_total": incomes_total_by_category,
+                "income_categories_avg_month": incomes_avg_month_by_category,
             }
         }
+
 
 
 @router.get("/analytics/charts/{chart_type}")
@@ -717,34 +750,58 @@ async def get_charts(
             monthly_sum_query = """
                 SELECT 
                     DATE_FORMAT(t.date, '%%Y-%%m') AS month,
-                    SUM(CASE WHEN t.direction = 'income' THEN ti.amount ELSE 0 END) AS total_income,
-                    SUM(CASE WHEN t.direction = 'expense' THEN ti.amount * -1 ELSE 0 END) AS total_expense,
-                    SUM(CASE WHEN t.direction = 'income' THEN ti.amount 
-                             WHEN t.direction = 'expense' THEN ti.amount * -1 
-                             ELSE 0 END) AS net_total
-                FROM 
+                    SUM(CASE WHEN t.direction = 'income' AND t.date <= CURDATE() THEN ti.amount ELSE 0 END) AS past_income,
+                    SUM(CASE WHEN t.direction = 'income' AND t.date > CURDATE() THEN ti.amount ELSE 0 END) AS upcoming_income,
+                    SUM(CASE WHEN t.direction = 'expense' AND t.date <= CURDATE() THEN ti.amount * -1 ELSE 0 END) AS past_expense,
+                    SUM(CASE WHEN t.direction = 'expense' AND t.date > CURDATE() THEN ti.amount * -1 ELSE 0 END) AS upcoming_expense,
+                    SUM(CASE WHEN t.direction = 'income' THEN ti.amount
+                            WHEN t.direction = 'expense' THEN ti.amount * -1
+                            ELSE 0 END) AS net_total
+                FROM
                     transactions t
-                JOIN 
+                JOIN
                     transaction_items ti ON t.transaction_id = ti.transactionID
-                WHERE 
+                WHERE
                     t.user_id = %s
-                GROUP BY 
+                GROUP BY
                     month
-                ORDER BY 
+                ORDER BY
                     month;
             """
             monthly_sum_result = await query_aiomysql(conn, monthly_sum_query, (user_id,), use_dictionary=False)
 
+            current_month = datetime.utcnow().strftime('%Y-%m')
+
+            def null_if_zero_and_out_of_range(value, month, is_past):
+                if value == 0:
+                    if is_past and month > current_month:
+                        return None
+                    if not is_past and month <= current_month:
+                        return None
+                return value
+
             if monthly_sum_result:
-                formatted_result = [
-                    {
-                        "month": row[0],
-                        "total_income": float(row[1]),
-                        "total_expense": float(row[2]),
-                        "net_total": float(row[3]),
-                    }
-                    for row in monthly_sum_result
-                ]
+                formatted_result = []
+                for row in monthly_sum_result:
+                    month = row[0]
+                    past_income = null_if_zero_and_out_of_range(float(row[1]), month, True)
+                    upcoming_income = null_if_zero_and_out_of_range(float(row[2]), month, False)
+                    past_expense = null_if_zero_and_out_of_range(float(row[3]), month, True)
+                    upcoming_expense = null_if_zero_and_out_of_range(float(row[4]), month, False)
+                    net_total = float(row[5])
+
+                    formatted_result.append({
+                        "month": month,
+                        "past": {
+                            "income": past_income,
+                            "expense": past_expense,
+                        },
+                        "upcoming": {
+                            "income": upcoming_income,
+                            "expense": upcoming_expense,
+                        },
+                        "net_total": net_total
+                    })
                 return {"monthlySums": formatted_result}
             return {"monthlySums": []}
 
