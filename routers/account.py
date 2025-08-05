@@ -55,7 +55,7 @@ async def login(data: dict):
         session_key = ''.join(random.choices(string.ascii_letters + string.digits, k=36))
 
         # Set the session expiration time
-        expiration_time = datetime.now() + timedelta(days=14)
+        expiration_time = datetime.now() + timedelta(days=90)   # Could be less, but is annoying and unnescary for the scope.
 
         # Insert the session key into the sessions table
         user_id = user[0][0]  # Get user_id from the query result
