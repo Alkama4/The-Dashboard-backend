@@ -12,7 +12,7 @@ from utils import (
     aiomysql_connect,
     query_aiomysql,
 )
-from .utils import (
+from .titles import (
     keep_title_watch_count_up_to_date,
 )
 
@@ -94,7 +94,6 @@ async def watch_list_search(
     async with aiomysql_conn_get() as conn:
         # Validate the session key and retrieve the user ID
         user_id = await validate_session_key_conn(conn, session_key, guest_lock=False)
-
 
         # Fetch search results from cache or TMDB API
         if not title_name:
@@ -222,17 +221,19 @@ async def update_genres():
 
 
 
-# Sort by options for future "/list_titles":
-    # Vote average (default)
-    # Last watched
-    # Alpabetical
-    # Popularity (amount of votes)
-    # Duration / Episode Count
+@router.get("/options/collections")
+async def list_collections(
+    session_key: str = Query(...),
+):
+    async with aiomysql_conn_get() as conn:
+        
+        # Validate the session key and retrieve the user ID
+        user_id = await validate_session_key_conn(conn, session_key, guest_lock=False)
 
-# When updating watch count query the values for the title inside the updating endpoint and return them. 
-
-# To add:
-# production_companies (new table) and image function for their images
-# production_companies (new table) and image function for their images
-# production_companies (new table) and image function for their images
-# production_companies (new table) and image function for their images
+        query = """
+            SELECT collection_id, name, parent_collection_id
+            FROM user_collection
+            WHERE user_id = %s
+            ORDER BY name ASC
+        """
+        return await query_aiomysql(conn, query, (user_id))

@@ -66,7 +66,11 @@ async def store_title_images(movie_images, title_id: str, replace_images = False
 
         # Get the first 5 backdrops
         if 'backdrops' in movie_images:
-            backdrops = movie_images['backdrops'][:5]  # Get the first 5 backdrops
+            backdrops = [
+                image for image in movie_images['backdrops']
+                if image.get('iso_639_1') is None
+            ][:5]  # Only get first 5 with iso_639_1 == None
+
             for idx, image in enumerate(backdrops):
                 image_url = f"https://image.tmdb.org/t/p/original{image['file_path']}"
                 file_extension = image['file_path'].split('.')[-1]
@@ -1153,17 +1157,21 @@ async def get_title_cards(
 @router.get("")
 async def list_titles(
     session_key: str = Query(...),
+
+    search_term: Optional[str] = None,
+    collection_id: Optional[int] = None,
     title_type: Optional[str] = None,
+    in_watchlist: Optional[bool] = None,
     watched: Optional[bool] = None,
     favourite: Optional[bool] = None,
     released: Optional[bool] = None,
-    started: Optional[bool] = None,
-    all_titles: Optional[str] = None,
-    search_term: Optional[str] = None,
-    collection_id: Optional[int] = None,
+    title_in_progress: Optional[bool] = None,
+    season_in_progress: Optional[bool] = None,
+    
     sort_by: Optional[str] = None,
     direction: Optional[str] = None,
-    offset: int = 0,
+
+    offset: Optional[int] = 0,
     title_limit: Optional[int] = None,
 ):
     
@@ -1173,8 +1181,23 @@ async def list_titles(
     title_limit = await fetch_user_settings(conn, user_id, 'list_all_titles_load_limit') or 30
 
     query, query_params = build_titles_query(
-        user_id, title_type, watched, favourite, released, started, all_titles, 
-        search_term, collection_id, sort_by, direction, offset, title_limit
+        user_id=user_id, 
+
+        title_type=title_type, 
+        in_watchlist=in_watchlist, 
+        watched=watched, 
+        favourite=favourite, 
+        released=released, 
+        title_in_progress=title_in_progress, 
+        season_in_progress=season_in_progress,
+        collection_id=collection_id, 
+        search_term=search_term, 
+        
+        sort_by=sort_by, 
+        direction=direction, 
+        
+        offset=offset, 
+        title_limit=title_limit + 1
     )
 
     results = await query_aiomysql(conn, query, tuple(query_params), use_dictionary=True)
@@ -1185,13 +1208,43 @@ async def list_titles(
     results = results[:title_limit]
 
     for row in results:
-        row["genres"] = row["genres"].split(", ") if row["genres"] else []
+        row["collections"] = row["collections"].split(", ") if row["collections"] else []
 
     return {
         "titles": results,
         "has_more": has_more,
         "offset": offset,
     }
+
+
+@router.get("/showcase")
+async def get_showcase(
+    session_key: str = Query(...)
+):
+    # Setup connection
+    conn = await aiomysql_connect()
+
+    # Get user_id and validate session key
+    user_id = await validate_session_key_conn(conn, session_key, guest_lock=False)
+    
+    query, query_params = build_titles_query(
+        user_id=user_id,
+
+        in_watchlist=True,
+        released=True,
+        watched=False,
+        sort_by='release_date',
+
+        title_limit=5,
+    )
+    titles = await query_aiomysql(conn, query, query_params)
+
+    # Split the collections
+    for row in titles:
+        row["collections"] = row["collections"].split(", ") if row["collections"] else []
+        row["logo_file_type"] = get_logo_type(row["title_id"])
+
+    return titles
 
 
 @router.get("/{title_id}")
@@ -1247,7 +1300,6 @@ async def get_title_info(
         "genres": title_data["genres"].split(", ") if title_data["genres"] else [],
         "collections": json.loads(title_data["collections"]) if title_data["collections"] else [],
         "backdrop_image_count": get_backdrop_count(title_data["title_id"]),
-        "logo_file_type": get_logo_type(title_data["title_id"]),
         "watch_now_links": custom_links["links"],
         "trailers": json.loads(title_data["trailers"]) if title_data["trailers"] else [],
     }

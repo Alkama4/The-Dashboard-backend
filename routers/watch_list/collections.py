@@ -130,22 +130,14 @@ async def list_collections(session_key: str = Query(...)):
     for collection in collection_map.values():
         query, query_params = build_titles_query(
             user_id,
-            title_type=None,
-            watched=None,
-            favourite=None,
-            released=None,
-            started=None,
-            all_titles=None,
-            search_term=None,
             collection_id=collection['collection_id'],
             sort_by='release_date',
             direction='ASC',
             offset=0,
-            title_limit=None
         )
         titles = await query_aiomysql(conn, query, tuple(query_params))
         for row in titles:
-            row["genres"] = row["genres"].split(", ") if row["genres"] else []
+            row["collections"] = row["collections"].split(", ") if row["collections"] else []
         collection['titles'] = titles
 
     conn.close()
