@@ -209,8 +209,8 @@ async def get_fastapi_request_data(timeframe: str = Query(None)):
                 endpoint_error_codes[endpoint][code] += 1
 
         # Build backend response time histogram (bucketed)
-        bucket_size = 100
-        max_bucket = 1000
+        bucket_size = 50
+        max_bucket = 500
         buckets = [(i * bucket_size, (i + 1) * bucket_size) for i in range(max_bucket // bucket_size)]
         buckets.append((max_bucket, 600000))
 
