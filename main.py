@@ -16,7 +16,7 @@ from utils import redis_client
 
 # Create fastAPI instance and set CORS middleware
 # Could limit the addresses but works fine as is, since only hosted on LAN.
-app = FastAPI()
+app = FastAPI(root_path="/api")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],      # List of allowed origins

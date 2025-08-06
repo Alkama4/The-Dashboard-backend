@@ -5,3 +5,4 @@ pillow
 redis
 aiomysql
 httpx
+cryptography

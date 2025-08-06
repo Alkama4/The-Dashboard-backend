@@ -91,7 +91,8 @@ async def get_server_resource_logs(timeframe: str = Query(None)):
                 complete_data.append({
                     "cpu_temperature": 0,
                     "cpu_usage": 0,
-                    "ram_usage": 0,
+                    "ram_usage_bytes": 0,
+                    "swap_usage_bytes": 0,
                     "cpu_clock_mhz": 0,
                     "network_sent_bytes": complete_data[-1]["network_sent_bytes"] if complete_data else 0,
                     "network_recv_bytes": complete_data[-1]["network_recv_bytes"] if complete_data else 0,
@@ -99,7 +100,15 @@ async def get_server_resource_logs(timeframe: str = Query(None)):
                 })
             current_time += timedelta(seconds=TIMESPAN_SECONDS)
 
-        return {"data": complete_data, "uptime_seconds": await redis_client.get("current_uptime_seconds")}
+        max_ram = await redis_client.get("max_ram_bytes")
+        max_swap = await redis_client.get("max_swap_bytes")
+
+        return {
+            "data": complete_data,
+            "uptime_seconds": await redis_client.get("current_uptime_seconds"),
+            "max_ram_bytes": int(max_ram) if max_ram else None,
+            "max_swap_bytes": int(max_swap) if max_swap else None
+        }
 
     except Exception as e:
         print(e)
@@ -143,7 +152,23 @@ async def store_server_resource_logs(data: dict):
     except Exception as e:
         print(e)
         return {"error": str(e)}
+    
 
+@router.post("/logs/system_resources_max")
+async def store_max_system_resources(data: dict):
+    try:
+        # Store the max RAM and swap sizes in Redis
+        if "max_ram_bytes" in data:
+            await redis_client.set("max_ram_bytes", data["max_ram_bytes"])
+        if "max_swap_bytes" in data:
+            await redis_client.set("max_swap_bytes", data["max_swap_bytes"])
+
+        return {"message": "Success"}
+
+    except Exception as e:
+        print(e)
+        return {"error": str(e)}
+    
 
 @router.get("/logs/fastapi")
 async def get_fastapi_request_data(timeframe: str = Query(None)):
