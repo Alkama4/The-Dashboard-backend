@@ -3,6 +3,7 @@ from collections import defaultdict
 from datetime import timedelta, datetime, timezone
 import json
 import psutil
+import docker
 from fastapi import HTTPException, Query, APIRouter
 
 # Internal imports
@@ -10,6 +11,9 @@ from utils import format_time_difference, redis_client, aiomysql_conn_get, query
 
 # Create the router object for this module
 router = APIRouter()
+
+# Docker client for container info
+client = docker.DockerClient(base_url='unix://var/run/docker.sock')
 
 
 @router.get("/drives")
@@ -127,7 +131,8 @@ async def store_server_resource_logs(data: dict):
             "timestamp": clamped_timestamp.isoformat(),
             "cpu_temperature": data.get("cpu_temperature"),
             "cpu_usage": data.get("cpu_usage"),
-            "ram_usage": data.get("ram_usage"),
+            "ram_usage_bytes": data.get("ram_usage_bytes"),
+            "swap_usage_bytes": data.get("swap_usage_bytes"),
             "cpu_clock_mhz": data.get("cpu_clock_mhz"),
             "network_sent_bytes": data.get("network_sent_bytes"),
             "network_recv_bytes": data.get("network_recv_bytes")
@@ -265,6 +270,10 @@ async def get_fastapi_request_data(timeframe: str = Query(None)):
         # Calculate average backend processing time
         avg_backend_time = total_backend_time / total_requests if total_requests else 0
 
+        # Calculate the success rate for all stored requests
+        success_count = sum(count for code, count in status_count.items() if 200 <= code < 300)
+        success_rate = (success_count / total_requests) if total_requests else 0
+
         # Prepare error stats per endpoint
         endpoint_error_summary = [
             {
@@ -308,6 +317,7 @@ async def get_fastapi_request_data(timeframe: str = Query(None)):
                 ),
                 "requests_over_time": filled_minute_buckets,
                 "backend_time_histogram": histogram_data,
+                "success_rate": success_rate,
                 "endpoint_error_summary": sorted(
                     endpoint_error_summary, key=lambda x: sum(err["count"] for err in x["errors"]), reverse=True
                 ),
@@ -446,3 +456,32 @@ async def get_backups():
         else:
             raise HTTPException(status_code=404, detail="No backups found.")
 
+
+@router.get("/containers")
+def list_containers():
+    stacks = defaultdict(list)
+    for container in client.containers.list(all=True):
+        info = container.attrs
+        state = info["State"]
+        labels = info.get("Config", {}).get("Labels", {})
+        stack = labels.get("com.docker.compose.project", "unknown")
+
+        started = datetime.strptime(state["StartedAt"][:19], '%Y-%m-%dT%H:%M:%S')
+        if state["Running"]:
+            uptime = datetime.utcnow() - started
+        else:
+            finished = datetime.strptime(state["FinishedAt"][:19], '%Y-%m-%dT%H:%M:%S')
+            uptime = finished - started
+
+        image = container.image.tags[0] if container.image.tags else container.image.short_id
+
+        stacks[stack].append({
+            "id": container.short_id,
+            "name": container.name,
+            "image": image,
+            "status": state["Status"],
+            "exit_code": state.get("ExitCode"),
+            "uptime": str(uptime.total_seconds())
+        })
+
+    return stacks

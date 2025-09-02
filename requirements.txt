@@ -6,3 +6,4 @@ redis
 aiomysql
 httpx
 cryptography
+docker
