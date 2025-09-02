@@ -12,6 +12,10 @@ from contextlib import asynccontextmanager
 # Semaphore so that we don't overwhelm the network with hundreads of conncections.
 semaphore = asyncio.Semaphore(5)
 
+# Image sizes and storing location
+ALLOWED_WIDTHS = {300, 600, 900, 1200}
+MEDIA_BASE_PATH = "/fastapi-media"
+
 # Set up aioredis client
 redis_client = redis.from_url(os.getenv("REDIS_PATH", "redis://127.0.0.1:6379"), decode_responses=True)
 
@@ -119,12 +123,19 @@ async def query_omdb(imdb_id: str):
 
 
 # Download an image from an url, semaphore to limit the amount of async tasks.
-async def download_image(image_url: str, image_save_path: str, replace = False):
+async def download_image(image_url: str, image_save_path: str, replace=False):
     try:
-        # Skip download if file already exists and the replace flag isn't set to true
         if os.path.exists(image_save_path) and not replace:
             print(f"Image already exists: {image_save_path}, skipping download.")
             return
+
+        if replace:
+            base, ext = os.path.splitext(image_save_path)
+            for width in ALLOWED_WIDTHS:
+                resized_path = f"{base}_{width}{ext}"
+                if os.path.exists(resized_path):
+                    os.remove(resized_path)
+                    print(f"Deleted resized image: {resized_path}")
 
         global semaphore
         async with semaphore:
@@ -132,7 +143,6 @@ async def download_image(image_url: str, image_save_path: str, replace = False):
                 response = await client.get(image_url)
 
         if response.status_code == 200:
-            # Saving part is unlimited, no semaphore needed here
             with open(image_save_path, 'wb') as f:
                 f.write(response.content)
             print(f"Image saved at {image_save_path}")

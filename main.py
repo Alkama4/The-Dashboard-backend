@@ -35,7 +35,7 @@ app.include_router(watch_list_router, prefix="/watch_list", tags=["watch_list"])
 # Runs everytime an endpoint is called. Used to log request for analysis.
 @app.middleware("http")
 async def log_request_data(request: Request, call_next):
-    if request.url.path == "/server/logs/system_resources":
+    if request.url.path == "/api/server/logs/system_resources":
         return await call_next(request)
 
     start_time = time.time()

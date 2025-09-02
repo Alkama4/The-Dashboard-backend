@@ -34,7 +34,7 @@ router = APIRouter()
 # ############## STORE IMAGES ##############
 
 # Used to get the images for a title and only the title. Seasons and episodes have a seperate one
-async def store_title_images(movie_images, title_id: str, replace_images = False):
+async def store_title_images(title_images, title_id: str, replace_images = False):
     try:
         base_path = f'/fastapi-media/title/{title_id}'
         Path(base_path).mkdir(parents=True, exist_ok=True)
@@ -42,8 +42,8 @@ async def store_title_images(movie_images, title_id: str, replace_images = False
         tasks = []
 
         # Get the first logo
-        if 'logos' in movie_images:
-            logo = movie_images['logos'][:1]  # Get only the first logo
+        if 'logos' in title_images:
+            logo = title_images['logos'][:1]  # Get only the first logo
             for idx, image in enumerate(logo):
                 image_url = f"https://image.tmdb.org/t/p/original{image['file_path']}"
                 file_extension = image['file_path'].split('.')[-1]
@@ -52,22 +52,26 @@ async def store_title_images(movie_images, title_id: str, replace_images = False
                 tasks.append(download_image(image_url, image_save_path, replace_images))
 
         # Get the first poster
-        if 'posters' in movie_images:
-            # Filter posters to only include those with "iso_639_1" as "en"
-            english_posters = [image for image in movie_images['posters'] if image.get('iso_639_1') == 'en']
+        if 'posters' in title_images:
+            # Try English first
+            posters = [img for img in title_images['posters'] if img.get('iso_639_1') == 'en']
             
-            if english_posters:  # Check if there are any English posters
-                first_english_poster = english_posters[0]  # Get the first English poster
-                image_url = f"https://image.tmdb.org/t/p/original{first_english_poster['file_path']}"
-                file_extension = first_english_poster['file_path'].split('.')[-1]
+            # Fallback to Finnish if no English posters
+            if not posters:
+                posters = [img for img in title_images['posters'] if img.get('iso_639_1') == 'fi']
+            
+            if posters:
+                first_poster = posters[0]
+                image_url = f"https://image.tmdb.org/t/p/original{first_poster['file_path']}"
+                file_extension = first_poster['file_path'].split('.')[-1]
                 image_filename = f"poster.{file_extension}"
                 image_save_path = os.path.join(base_path, image_filename)
                 tasks.append(download_image(image_url, image_save_path, replace_images))
 
         # Get the first 5 backdrops
-        if 'backdrops' in movie_images:
+        if 'backdrops' in title_images:
             backdrops = [
-                image for image in movie_images['backdrops']
+                image for image in title_images['backdrops']
                 if image.get('iso_639_1') is None
             ][:5]  # Only get first 5 with iso_639_1 == None
 
@@ -313,7 +317,7 @@ async def add_or_update_movie_title(
         # Get the data from TMDB
         movie_title_info = await query_tmdb(f"/movie/{tmdb_id}", {
             "append_to_response": "images,releases,videos",
-            "include_image_language": "en,null",
+            "include_image_language": "en,fi,null",
         })
 
         # Retrieve the age rating
@@ -464,7 +468,7 @@ async def add_or_update_tv_title(
             # Get the data from tmdb
             tv_title_info = await query_tmdb(f"/tv/{tmdb_id}", {
                 "append_to_response": "external_ids,images,content_ratings,videos", 
-                "include_image_language": "en,null"
+                "include_image_language": "en,fi,null"
             })
 
             # - - - TITLE - - - 
