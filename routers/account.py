@@ -2,7 +2,11 @@
 import random
 import string
 from datetime import datetime, timedelta
-from fastapi import HTTPException, Query, APIRouter
+from fastapi import HTTPException, Query, APIRouter, UploadFile, File, Form
+import uuid
+import os
+from io import BytesIO
+from PIL import Image
 
 # Internal imports
 from utils import aiomysql_conn_get, query_aiomysql, validate_session_key_conn
@@ -301,3 +305,170 @@ async def update_settings(data: dict):
         await query_aiomysql(conn, query, tuple(values))
 
         return {"message": "Settings updated successfully!"}
+
+
+@router.post("/external_service_links")
+async def external_service_links(
+    session_key: str = Form(...),
+    name: str = Form(...),
+    link: str = Form(...),
+    description: str | None = Form(None),
+    image: UploadFile | None = File(None),
+):
+    async with aiomysql_conn_get() as conn:
+        user_id = await validate_session_key_conn(conn, session_key, guest_lock=True)
+
+        MAX_SIZE = 500  # max width or height in pixels
+        
+        image_path = None
+        if image:
+            ext = os.path.splitext(image.filename)[1].lower()
+            if ext not in {".png", ".jpeg", ".jpg", ".svg"}:
+                raise HTTPException(status_code=400, detail="Unsupported file type")
+
+            contents = await image.read()
+            image_uuid = uuid.uuid4()
+            media_dir = "/fastapi-media/service-images"
+            os.makedirs(media_dir, exist_ok=True)
+            image_path = os.path.join(media_dir, f"{image_uuid}{ext}")
+
+            if ext != ".svg":
+                img = Image.open(BytesIO(contents))
+                img.thumbnail((MAX_SIZE, MAX_SIZE))  # resizes preserving aspect ratio
+                img.save(image_path)  # optionally choose a standard format like PNG
+            else:
+                # Save SVG as-is
+                with open(image_path, "wb") as f:
+                    f.write(contents)
+                    
+        create_entry_query = """
+            INSERT INTO user_external_service_links
+            (user_id, name, link, description, image_path)
+            VALUES (%s, %s, %s, %s, %s);
+        """
+        create_entry_params = (user_id, name, link, description, image_path)
+        await query_aiomysql(conn, create_entry_query, create_entry_params)
+
+        return {"message": f'External service link "{name}" created successfully!'}
+    
+
+@router.put("/external_service_links/{link_id}")
+async def update_external_service_link(
+    link_id: int,
+    session_key: str = Form(...),
+    name: str = Form(...),
+    link: str = Form(...),
+    description: str | None = Form(None),
+    image: UploadFile | None = File(None),
+    remove_image: bool = Form(False),
+):
+    async with aiomysql_conn_get() as conn:
+        user_id = await validate_session_key_conn(conn, session_key, guest_lock=True)
+
+        # Fetch existing record
+        existing_rows = await query_aiomysql(
+            conn,
+            "SELECT image_path FROM user_external_service_links WHERE id = %s AND user_id = %s LIMIT 1",
+            (link_id, user_id),
+        )
+        if not existing_rows:
+            raise HTTPException(status_code=404, detail="Service link not found")
+
+        existing = existing_rows[0]
+        old_image_path = existing["image_path"]
+        image_path = old_image_path
+
+        if remove_image:
+            if old_image_path and os.path.exists(old_image_path):
+                os.remove(old_image_path)
+            image_path = None
+
+        elif image:
+            # Delete old image if exists
+            if old_image_path and os.path.exists(old_image_path):
+                os.remove(old_image_path)
+
+            ext = os.path.splitext(image.filename)[1].lower()
+            if ext not in {".png", ".jpeg", ".jpg", ".svg"}:
+                raise HTTPException(status_code=400, detail="Unsupported file type")
+
+            contents = await image.read()
+            image_uuid = uuid.uuid4()
+            media_dir = "/fastapi-media/service-images"
+            os.makedirs(media_dir, exist_ok=True)
+            image_path = os.path.join(media_dir, f"{image_uuid}{ext}")
+
+            if ext != ".svg":
+                img = Image.open(BytesIO(contents))
+                img.thumbnail((500, 500))
+                img.save(image_path)
+            else:
+                with open(image_path, "wb") as f:
+                    f.write(contents)
+
+        update_query = """
+            UPDATE user_external_service_links
+            SET name = %s, link = %s, description = %s, image_path = %s
+            WHERE id = %s AND user_id = %s
+        """
+        await query_aiomysql(
+            conn,
+            update_query,
+            (name, link, description, image_path, link_id, user_id),
+        )
+
+        return {"message": f'External service link "{name}" updated successfully!'}
+
+
+
+# Note: If a user is deleted, linked images remain on disk since the links are cascade-deleted.
+# This isn't critical, and handling it would add unnecessary complexity considering the scope of the project.
+
+@router.delete("/external_service_links/{link_id}")
+async def delete_external_service_link(link_id: int, data: dict):
+    async with aiomysql_conn_get() as conn:
+        user_id = await validate_session_key_conn(conn, data.get("session_key"), guest_lock=True)
+
+        # Fetch image path
+        rows = await query_aiomysql(
+            conn,
+            "SELECT image_path FROM user_external_service_links WHERE user_id = %s AND id = %s LIMIT 1",
+            (user_id, link_id),
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail="Service link not found")
+
+        image_path = rows[0]["image_path"]
+
+        # Delete DB record
+        delete_query = """
+            DELETE FROM user_external_service_links
+            WHERE user_id = %s AND id = %s
+        """
+        await query_aiomysql(conn, delete_query, (user_id, link_id))
+
+        # Delete image file if exists
+        if image_path and os.path.exists(image_path):
+            os.remove(image_path)
+
+        return {"message": "External service link deleted successfully!"}
+
+
+@router.get("/external_service_links")
+async def get_external_service_links(
+    session_key: str = Query(...)
+):
+    async with aiomysql_conn_get() as conn:
+        # Validate the session key and get the guest id if not session_key
+        user_id = await validate_session_key_conn(conn, session_key, guest_lock=False)
+
+        # Retrieve the links
+        query = """
+            SELECT id, name, link, description, image_path
+            FROM user_external_service_links
+            WHERE user_id = %s
+            ORDER BY id DESC;
+        """
+        rows = await query_aiomysql(conn, query, (user_id,))
+
+        return {"links": rows}

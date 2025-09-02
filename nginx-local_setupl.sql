@@ -27,6 +27,18 @@ CREATE TABLE IF NOT EXISTS user_settings (
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
 
+DROP TABLE IF EXISTS user_external_service_links;
+CREATE TABLE IF NOT EXISTS user_external_service_links (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    link VARCHAR(255) NOT NULL,
+    description TEXT DEFAULT NULL,
+    image_path VARCHAR(255) DEFAULT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+    UNIQUE KEY (user_id, link)
+);
+
 --------------- TRANSACTIONS ---------------
 DROP TABLE IF EXISTS transactions;
 CREATE TABLE IF NOT EXISTS transactions (
