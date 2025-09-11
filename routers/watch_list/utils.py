@@ -64,18 +64,22 @@ def build_titles_query(
             (SELECT COUNT(episode_id) FROM episodes WHERE title_id = t.title_id) AS episode_count,
             utd.favourite,
             utd.last_updated,
-            EXISTS (
-                SELECT 1
-                FROM episodes e
-                LEFT JOIN user_episode_details ued
-                    ON ued.episode_id = e.episode_id
-                    AND ued.user_id = utd.user_id
-                WHERE e.title_id = t.title_id
-                    AND e.air_date <= CURDATE()
-                    AND e.air_date >= DATE_SUB(CURDATE(), INTERVAL 14 DAY)
-                    AND COALESCE(ued.watch_count, 0) != 1
-                LIMIT 1
-            ) AS new_episodes,
+            CASE
+                WHEN t.type = 'tv' THEN
+                    EXISTS (
+                        SELECT 1
+                        FROM episodes e
+                        LEFT JOIN user_episode_details ued
+                            ON ued.episode_id = e.episode_id
+                            AND ued.user_id = utd.user_id
+                        WHERE e.title_id = t.title_id
+                        AND e.air_date <= CURDATE()
+                        AND e.air_date >= DATE_SUB(CURDATE(), INTERVAL 14 DAY)
+                        AND COALESCE(ued.watch_count, 0) <> 1
+                        LIMIT 1
+                    )
+                ELSE FALSE
+            END AS new_episodes,
             CASE
                 WHEN utd.title_id IS NOT NULL THEN TRUE
                 ELSE FALSE
@@ -86,7 +90,11 @@ def build_titles_query(
                     ELSE NULL
                 END
                 ORDER BY uc.name ASC SEPARATOR ', '
-            ) AS collections
+            ) AS collections,
+            GROUP_CONCAT(
+                DISTINCT g.genre_name
+                ORDER BY g.genre_name ASC SEPARATOR ', '
+            ) AS genres
         FROM
             titles t
         LEFT JOIN
@@ -95,6 +103,10 @@ def build_titles_query(
             collection_title ct ON ct.title_id = t.title_id
         LEFT JOIN
             user_collection uc ON uc.collection_id = ct.collection_id
+        LEFT JOIN
+            title_genres tg ON tg.title_id = t.title_id
+        LEFT JOIN
+            genres g ON g.genre_id = tg.genre_id
         WHERE
             1=1
     """
