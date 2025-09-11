@@ -98,8 +98,8 @@ CREATE TABLE IF NOT EXISTS titles (
     imdb_vote_average DECIMAL(3,1),
     imdb_vote_count INT,
     overview TEXT,
-    backup_poster_url VARCHAR(255),    -- Serve as a backup for standalone and other uses
-    backup_backdrop_url VARCHAR(255),  -- Serve as a backup for standalone and other uses
+    backup_poster_url VARCHAR(255),
+    backup_backdrop_url VARCHAR(255),
     movie_runtime INT DEFAULT NULL,
     release_date DATE DEFAULT NULL,
     revenue BIGINT,
@@ -110,6 +110,12 @@ CREATE TABLE IF NOT EXISTS titles (
     age_rating VARCHAR(10),
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
+CREATE INDEX idx_titles_type ON titles (type);
+CREATE INDEX idx_titles_release_date ON titles (release_date);
+CREATE INDEX idx_titles_name ON titles (name);
+CREATE INDEX idx_titles_vote_avg ON titles (tmdb_vote_average);
+CREATE INDEX idx_titles_vote_count ON titles (tmdb_vote_count);
+CREATE INDEX idx_titles_last_updated ON titles (last_updated);
 
 DROP TABLE IF EXISTS seasons;
 CREATE TABLE IF NOT EXISTS seasons (
@@ -160,6 +166,10 @@ CREATE TABLE IF NOT EXISTS user_title_details (
     FOREIGN KEY (title_id) REFERENCES titles(title_id) ON DELETE CASCADE,
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
+CREATE INDEX idx_utd_user_title ON user_title_details (user_id, title_id);
+CREATE INDEX idx_utd_user_fav ON user_title_details (user_id, favourite);
+CREATE INDEX idx_utd_user_watchcount ON user_title_details (user_id, watch_count);
+CREATE INDEX idx_utd_user_lastupdated ON user_title_details (user_id, last_updated);
 
 DROP TABLE IF EXISTS user_episode_details;
 CREATE TABLE IF NOT EXISTS user_episode_details (
@@ -172,6 +182,7 @@ CREATE TABLE IF NOT EXISTS user_episode_details (
     FOREIGN KEY (episode_id) REFERENCES episodes(episode_id) ON DELETE CASCADE
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
+CREATE INDEX idx_ued_episode_user_watch ON user_episode_details (episode_id, user_id, watch_count);
 
 -- Genres
 DROP TABLE IF EXISTS genres;
@@ -190,6 +201,7 @@ CREATE TABLE IF NOT EXISTS title_genres (
     FOREIGN KEY (title_id) REFERENCES titles(title_id) ON DELETE CASCADE,
     FOREIGN KEY (genre_id) REFERENCES genres(genre_id) ON DELETE CASCADE
 );
+CREATE INDEX idx_tg_title_genre ON title_genres (title_id, genre_id);
 
 -- Collections
 DROP TABLE IF EXISTS user_collection;
@@ -202,6 +214,7 @@ CREATE TABLE IF NOT EXISTS user_collection (
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
     FOREIGN KEY (parent_collection_id) REFERENCES user_collection(collection_id) ON DELETE CASCADE
 );
+CREATE INDEX idx_uc_collection_user ON user_collection (collection_id, user_id);
 
 DROP TABLE IF EXISTS collection_title;
 CREATE TABLE IF NOT EXISTS collection_title (
@@ -211,6 +224,7 @@ CREATE TABLE IF NOT EXISTS collection_title (
     FOREIGN KEY (collection_id) REFERENCES user_collection(collection_id) ON DELETE CASCADE,
     FOREIGN KEY (title_id) REFERENCES titles(title_id) ON DELETE CASCADE
 );
+CREATE INDEX idx_ct_title_collection ON collection_title (title_id, collection_id);
 
 
 -- Trailers
