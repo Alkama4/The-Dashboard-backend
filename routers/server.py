@@ -385,7 +385,7 @@ async def get_backups():
                     # A custom thershold for the status when using the air gapped drive
                     thresholds = {
                         "Old laptop hdd": [24 * 7 * (52 / 4), 24 * 7 * (52 / 2)],
-                        "default": [24, 72]
+                        "default": [48, 96]
                     }
                     device_thresholds = thresholds.get(backup[1], thresholds["default"])
 
