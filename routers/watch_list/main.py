@@ -165,7 +165,6 @@ async def watch_list_search(
 
 
 # Used to manually update the genres if they change etc. In the past was ran always on start, but since it ran on all 4 workers the feature was removed. Basically only used if I were to wipe the whole db.
-
 # DO NOT call if not necessary. Have not been recently tested and will cause unnescary problems
 @router.put("/genres")
 async def update_genres():

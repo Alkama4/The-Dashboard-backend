@@ -226,19 +226,26 @@ CREATE TABLE IF NOT EXISTS title_trailers (
 );
 
 
-
---------------- INDEXES ---------------
-
--- Just ran this and left it be
-CREATE INDEX idx_user_id ON transactions(user_id, date);
-
-
--- Decided to not mess with these for now, but here are some that I messed with
-DROP INDEX idx_user_id ON transactions;
-
-SHOW INDEX FROM transactions;
-SHOW INDEX FROM transaction_items;
-EXPLAIN SELECT * 
-FROM transactions 
-WHERE user_id = 2;
+-- Media links
+DROP TABLE IF EXISTS title_media_details;
+CREATE TABLE IF NOT EXISTS title_media_details (
+    media_id INT AUTO_INCREMENT PRIMARY KEY,
+    title_id INT DEFAULT NULL,
+    season_id INT DEFAULT NULL,
+    episode_id INT DEFAULT NULL,
+    link VARCHAR(512) NOT NULL,
+    parsed_file_name VARCHAR(255) DEFAULT NULL,
+    content_type ENUM('movie','episode','extra') DEFAULT 'movie',
+    extra_type VARCHAR(64) DEFAULT NULL,
+    file_size BIGINT UNSIGNED DEFAULT NULL,
+    hdr_type ENUM('HDR10', 'HDR10+', 'HLG', 'Dolby Vision') DEFAULT NULL,
+    video_width SMALLINT UNSIGNED DEFAULT NULL,
+    video_height SMALLINT UNSIGNED DEFAULT NULL,
+    confidence TINYINT UNSIGNED DEFAULT 0,
+    FOREIGN KEY (title_id) REFERENCES titles(title_id) ON DELETE CASCADE,
+    FOREIGN KEY (season_id) REFERENCES seasons(season_id) ON DELETE CASCADE,
+    FOREIGN KEY (episode_id) REFERENCES episodes(episode_id) ON DELETE CASCADE,
+    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE(title_id, link)
+);
 

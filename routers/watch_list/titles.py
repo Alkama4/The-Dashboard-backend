@@ -4,8 +4,11 @@ from typing import Optional
 from pathlib import Path
 import json
 import os
+import re
 import asyncio
 import httpx
+import subprocess
+from difflib import SequenceMatcher
 
 # Internal imports
 from custom_values import custom_combined_links
@@ -27,6 +30,9 @@ from .utils import (
     format_FI_age_rating,
     tmdb_to_title_id,
 )
+
+# Semaphore to limit concurrent tasks with heavy disk usage
+semaphore = asyncio.Semaphore(5)
 
 router = APIRouter()
 
@@ -302,6 +308,86 @@ async def keep_title_watch_count_up_to_date(conn, user_id, title_id=None, season
         """
         await query_aiomysql(conn, update_title_watch_count_query, (user_id, title_id, min_watch_count, min_watch_count))
 
+
+
+# ############## TITLE MEDIA ##############
+
+# Get metadata about a video file
+def get_video_metadata(file_path: str):
+    try:
+        file_size = os.path.getsize(file_path)
+    except OSError as e:
+        print(f"Could not read size: {e}")
+        file_size = None
+
+    cmd = [
+        "ffprobe", "-v", "error", "-err_detect", "ignore_err",
+        "-select_streams", "v:0",
+        "-show_entries",
+        "stream=width,height,color_transfer,color_primaries,color_space,"
+        "mastering_display_metadata,max_cll",
+        "-of", "json",
+        file_path
+    ]
+
+    result = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    hdr_type = None
+    width, height = None, None
+
+    if result.stdout:
+        try:
+            data = json.loads(result.stdout)
+            streams = data.get("streams", [])
+            if streams:
+                s = streams[0]
+                width = s.get("width")
+                height = s.get("height")
+                transfer = s.get("color_transfer")
+                # primaries = s.get("color_primaries")
+                mastering = s.get("mastering_display_metadata")
+                max_cll = s.get("max_cll")
+
+                if transfer == "smpte2084":
+                    hdr_type = "HDR10"
+                    if "maxCLL" in str(max_cll) or "HDR10+" in str(mastering):
+                        hdr_type = "HDR10+"
+                elif transfer == "arib-std-b67":
+                    hdr_type = "HLG"
+                elif transfer == "dolbyvision":
+                    hdr_type = "Dolby Vision"
+        except json.JSONDecodeError:
+            pass
+
+    return {
+        "file_size": file_size,
+        "width": width,
+        "height": height,
+        "hdr_type": hdr_type
+    }
+
+
+async def get_title_media_details(conn, title_id):
+    query = """
+        SELECT *
+        FROM title_media_details
+        WHERE title_id = %s
+    """
+    rows = await query_aiomysql(conn, query, (title_id,))
+
+    # Split into separate lists
+    return {
+        'title': {
+            'movies': [r for r in rows if r["content_type"] == "movie"],
+            'extras': [r for r in rows if r["content_type"] == "extra"]
+        },
+        'episodes': [r for r in rows if r["content_type"] == "episode"]
+    }
 
 
 # ############## MAIN ADD/UPDATE METHODS ##############
@@ -648,7 +734,7 @@ async def add_or_update_tv_title(
             # query just for the images and and general data for seasons images 
             tv_title_info = await query_tmdb(f"/tv/{tmdb_id}", {
                 "append_to_response": "images", 
-                "include_image_language": "en,null"
+                "include_image_language": "en,fi,null"
             })
 
             # Title images data
@@ -824,7 +910,6 @@ async def add_user_title(data: dict):
             "title_id": title_id,
             "message": 'Title added successfully to your watchlist!'
         }
-
 
 @router.delete("/{title_id}")
 async def remove_user_title(title_id: int, data: dict):
@@ -1296,7 +1381,7 @@ async def get_title_info(
     title_data = title_query_results[0]
 
     # Add custom links and other properties
-    custom_links = custom_combined_links(title_data["name"])
+    title_media_details = await get_title_media_details(conn, title_id)
 
     # Final assembled data
     title_info = {
@@ -1304,7 +1389,7 @@ async def get_title_info(
         "genres": title_data["genres"].split(", ") if title_data["genres"] else [],
         "collections": json.loads(title_data["collections"]) if title_data["collections"] else [],
         "backdrop_image_count": get_backdrop_count(title_data["title_id"]),
-        "watch_now_links": custom_links["links"],
+        "title_media": title_media_details["title"],
         "trailers": json.loads(title_data["trailers"]) if title_data["trailers"] else [],
     }
 
@@ -1350,25 +1435,20 @@ async def get_title_info(
         """
         episodes = await query_aiomysql(conn, get_episodes_query, (user_id, title_id))
 
-        # Get episodes links
-        episode_links = custom_links["episodes"]
+        # Build a quick lookup for media items by episode_id
+        media_by_episode = {}
+        for media in title_media_details["episodes"]:
+            media_by_episode.setdefault(media["episode_id"], []).append(media)
 
-        # Map out and combine data
+        # Create a season map that already contains the season data
         season_map = {s["season_id"]: {**s, "episodes": []} for s in seasons}
-        season_number_map = {s["season_id"]: s["season_number"] for s in seasons}
 
+        # Attach media to each episode and place the episode in its season
         for episode in episodes:
-            season_id = episode["season_id"]
-            season_number = season_number_map.get(season_id)
-            if season_id in season_map:
-                episode_key = f"Episode {episode['episode_number']:02d}"
-                season_key = f"Season {season_number:02d}"
-                
-                if season_key in episode_links and episode_key in episode_links[season_key]:
-                    episode["watch_now_links"] = [episode_links[season_key][episode_key]]
-                
-                season_map[season_id]["episodes"].append(episode)
+            episode["episode_media"] = media_by_episode.get(episode["episode_id"], [])
+            season_map[episode["season_id"]]["episodes"].append(episode)
 
+        # Finally attach the seasons list to the title
         title_info["seasons"] = list(season_map.values())
     
     conn.close()
@@ -1414,3 +1494,361 @@ async def list_collections(
             root_collections.append(collection)
 
     return root_collections
+
+
+@router.patch("/media_info")
+@router.patch("/{title_id}/media_info")
+async def update_title_media_links(
+    title_id: Optional[int] = None
+):
+    async with aiomysql_conn_get() as conn:
+        internal_media_base_path = "/media"
+        external_media_base_path = os.getenv("EXTERNAL_MEDIA_BASE_PATH", "")
+        media_exts = (".mkv", ".mp4", ".avi")
+
+        def _clean(name: str) -> str:
+            return re.sub(r'[^a-z0-9]', '', name.lower())
+        
+        if title_id:
+            updating_for_single_title = True
+        else:
+            updating_for_single_title = False
+
+        paths = []
+
+        for root, dirs, file_list in os.walk(internal_media_base_path):
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            for file in file_list:
+                if "sample" in file.lower():
+                    continue
+                if file.lower().endswith(media_exts):
+                    paths.append(os.path.join(root, file))
+
+        if title_id:
+            db_titles_query = """
+                SELECT name, title_id
+                FROM titles
+                WHERE title_id = %s
+            """
+            db_titles = await query_aiomysql(conn, db_titles_query, title_id)
+        else:
+            db_titles_query = """
+                SELECT name, title_id
+                FROM titles
+            """
+            db_titles = await query_aiomysql(conn, db_titles_query)
+
+        results = []
+        compare_cache = {}   # Cache for already compared pairs
+
+        for internal_path in paths:
+            cur = internal_path
+            parsed_names = []
+            matches = []
+            match_season_xx = None
+            match_release_year = None
+            episode_detected = False
+            extra_episode_detected = False
+            file_name_matched = False
+            attempt_count = 0
+
+            while True:
+                attempt_count += 1
+                slash_pos = cur.rfind("/")
+                if slash_pos == -1:
+                    break
+
+                segment = cur[slash_pos + 1 :]
+
+                # Find the three possible matches
+                match_season_xx = re.search(r"s\d+", segment, re.IGNORECASE)
+                match_release_year    = re.search(r"(?<!\w)\d{4}(?!\w)", segment)
+                match_bracket         = re.search(r"\[", segment)
+
+                # Figure out stuff about seasons and episodes
+                if re.search(r"s\d+e\d+", segment, re.IGNORECASE):
+                    episode_detected = True
+                    season_num = int(match_season_xx.group()[1:])  # e.g. "S05" → "05" → 5
+                    if season_num == 0:
+                        extra_episode_detected = True
+
+                # Decide which one comes first
+                if match_season_xx and match_release_year:
+                    chosen = match_season_xx if match_season_xx.start() <= match_release_year.start() \
+                            else match_release_year
+                else:
+                    chosen = match_season_xx or match_release_year
+
+                # If neither of the first two were found, use the bracket
+                if not chosen and match_bracket:
+                    chosen = match_bracket
+
+                if chosen:
+                    parsed_name = segment[: chosen.start()]
+                    if parsed_name != "":
+                        parsed_name = parsed_name.replace(".", " ")
+                        parsed_name = re.sub(r'\s-\s*$', '', parsed_name)
+                        parsed_name = re.sub(r'\s\(\s*$', '', parsed_name)
+                        parsed_name = re.sub(r'\[.*?\]', '', parsed_name)
+                        parsed_name = parsed_name.strip()
+                        parsed_names.append(parsed_name)
+                        if attempt_count == 1:
+                            # We are still analyzing the file name and not a dir name
+                            file_name_matched = True
+
+                cur = cur[:slash_pos]
+
+            if not parsed_names:
+                print("Failed to parse name: " + internal_path)
+
+            # Compare parsed_name with cache
+            cache_key = parsed_name.lower()
+            if cache_key in compare_cache:
+                matches = compare_cache[cache_key]
+
+            # Compare parsed_name with db data
+            else:
+                matches = []
+                for parsed_name in parsed_names:
+                    for db_row in db_titles:
+                        db_name = db_row['name']
+
+                        # Exact match
+                        if _clean(parsed_name) == _clean(db_name):
+                            matches = [{
+                                'db_title_name': db_name,
+                                'db_title_id': db_row['title_id'],
+                                'similarity': 1.0
+                            }]
+                            break
+
+                        # Skip if one title is just a whole-word prefix of the other e.g. 
+                        # parsed_name = "The Matrix"
+                        # db_name     = "The Matrix Revolutions"
+                        if len(parsed_name) >= len(db_name):
+                            longer, shorter = parsed_name, db_name
+                        else:
+                            longer, shorter = db_name, parsed_name
+
+                        whole_word_pattern = r'\b' + re.escape(shorter) + r'\b'
+                        if re.search(whole_word_pattern, longer):
+                            print("whole-word prefix continue:")
+                            print(parsed_name)
+                            print(db_name)
+                            continue
+
+                        # Last try to match with sequence matcher
+                        similarity = SequenceMatcher(None, parsed_name, db_name).ratio()
+                        if similarity >= 0.6:
+                            matches.append({
+                                'db_title_name': db_name,
+                                'db_title_id': db_row['title_id'],
+                                'confidence': similarity * 100
+                            })
+                    
+                    if matches != []:
+                        break
+
+                # FOR DEBUGGING DO NOT REMOVE
+                # if not matches:
+                #     print("Failed to combine with title" + parsed_name)
+                #     print(internal_path)
+
+                # FOR DEBUGGING DO NOT REMOVE
+                # if len(matches) > 1:
+                #     print("Failed to combine with title" + parsed_name)
+                #     print(internal_path)
+                #     print(matches)
+
+                compare_cache[cache_key] = matches
+
+            link = internal_path.replace(internal_media_base_path, external_media_base_path)
+            extra_name = None
+            extra_parent_folder = None
+            content_type = None
+            episode_number = None
+            season_number = None
+
+            if (episode_detected and not extra_episode_detected):
+                content_type = "episode"
+                search = re.search(r"s(\d+)e(\d+)", internal_path, re.IGNORECASE)
+                if search:
+                    season_number = int(search.group(1))
+                    episode_number = int(search.group(2))
+
+            elif ((len(parsed_names) > 1 and _clean(parsed_names[0]) == _clean(parsed_names[1])) or file_name_matched) and not extra_episode_detected:
+                content_type = "movie"
+
+            else:
+                content_type = "extra"
+                extra_name = os.path.basename(internal_path)
+                extra_name = re.sub(r'\.[^.]+$', '', extra_name)
+                extra_parent_folder = os.path.basename(os.path.dirname(internal_path))
+            
+            # Add the title no matter if we found a match or not
+            # Just allows us to display the files without a title
+            results.append({
+                "matching_db_titles": matches,  # title id -> other ids
+                "season_number": season_number,
+                "episode_number": episode_number,
+                "link": link,
+                "parsed_file_name": extra_name if extra_name else parsed_name,
+                "content_type": content_type,
+                "extra_type": extra_parent_folder,
+                # Store this here for a while so that we have access to it when getting the metadata
+                "internal_path": internal_path,     
+                # "video_metadata": get_video_metadata(internal_path)
+            })
+
+        # Collect all needed (title_id, season_number, episode_number) from results
+        title_ids = set()
+        season_keys = set()
+        episode_keys = set()
+
+        for result in results:
+            if result["matching_db_titles"]:
+                db_title = result["matching_db_titles"][0]
+                title_id = db_title["db_title_id"]
+                title_ids.add(title_id)
+
+                if result.get("season_number"):
+                    season_keys.add((title_id, result["season_number"]))
+
+                if result.get("season_number") and result.get("episode_number"):
+                    episode_keys.add((title_id, result["season_number"], result["episode_number"]))
+
+        # Query all seasons for relevant titles
+        if season_keys:
+            query = """
+                SELECT season_id, title_id, season_number
+                FROM seasons
+                WHERE title_id IN %s
+            """
+            db_seasons = await query_aiomysql(conn, query, (tuple(title_ids),))
+            seasons_lookup = {
+                (row["title_id"], row["season_number"]): row["season_id"]
+                for row in db_seasons
+            }
+        else:
+            seasons_lookup = {}
+
+        # Query all episodes for relevant titles
+        if episode_keys:
+            query = """
+                SELECT episode_id, title_id, season_id, episode_number
+                FROM episodes
+                WHERE title_id IN %s
+            """
+            db_episodes = await query_aiomysql(conn, query, (tuple(title_ids),))
+            episodes_lookup = {
+                (row["title_id"], row["season_id"], row["episode_number"]): row["episode_id"]
+                for row in db_episodes
+            }
+        else:
+            episodes_lookup = {}
+
+
+        total_tasks = sum(
+            len(result.get("matching_db_titles", [])) for result in results
+        )
+        completed_tasks = 0
+        progress_lock = asyncio.Lock()  # Ensures only one print task is running at once
+
+        # Insert loop
+        for result in results:
+            db_titles = result.get("matching_db_titles", [])
+            video = result.get("video_metadata", {})
+
+            if not db_titles:
+                if updating_for_single_title:
+                    # If updating a single title we should not insert
+                    # empty values, only when scanning everything.
+                    continue
+                else:
+                    # Handle no matching titles
+                    db_titles = [{"db_title_id": None, "similarity": 0}]
+
+            for db_title in db_titles:
+                title_id = db_title["db_title_id"]
+                confidence = int(db_title.get("similarity", 0) * 100)
+
+                season_id = seasons_lookup.get((title_id, result.get("season_number")))
+                episode_id = None
+                if season_id:
+                    episode_id = episodes_lookup.get(
+                        (title_id, season_id, result.get("episode_number"))
+                    )
+
+                query = """
+                    INSERT INTO title_media_details (
+                        title_id,
+                        season_id,
+                        episode_id,
+                        link,
+                        parsed_file_name,
+                        content_type,
+                        extra_type,
+                        file_size,
+                        hdr_type,
+                        video_width,
+                        video_height,
+                        confidence
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) AS new
+                    ON DUPLICATE KEY UPDATE
+                        parsed_file_name = new.parsed_file_name,
+                        content_type = new.content_type,
+                        extra_type = new.extra_type,
+                        file_size = new.file_size,
+                        hdr_type = new.hdr_type,
+                        video_width = new.video_width,
+                        video_height = new.video_height,
+                        confidence = new.confidence,
+                        last_updated = CURRENT_TIMESTAMP
+                """
+
+                params = (
+                    title_id,
+                    season_id,
+                    episode_id,
+                    result["link"],
+                    result.get("parsed_file_name"),
+                    result.get("content_type"),
+                    result.get("extra_type"),
+                    video.get("file_size"),
+                    video.get("hdr_type"),
+                    video.get("width"),
+                    video.get("height"),
+                    confidence,
+                )
+
+                row_id = await query_aiomysql(conn, query, params, return_lastrowid=True)
+
+                async def update_metadata(media_id=row_id, path=result.get("internal_path")):
+                    nonlocal completed_tasks
+                    async with semaphore:
+                        loop = asyncio.get_running_loop()
+                        metadata = await loop.run_in_executor(None, get_video_metadata, path)
+                        async with aiomysql_conn_get() as conn:
+                            update_query = """
+                                UPDATE title_media_details
+                                SET file_size=%s, hdr_type=%s, video_width=%s, video_height=%s
+                                WHERE media_id=%s
+                            """
+                            await query_aiomysql(conn, update_query, (
+                                metadata.get("file_size"),
+                                metadata.get("hdr_type"),
+                                metadata.get("width"),
+                                metadata.get("height"),
+                                media_id
+                            ))
+                        async with progress_lock:
+                            completed_tasks += 1
+                            print(f"Updated video metadata for media_id {media_id} ({completed_tasks}/{total_tasks})")
+
+                asyncio.create_task(update_metadata())
+
+
+        return {
+            'message': 'Entries for media created! Metadata is still being acquired asynchronously in the background.'
+        }
