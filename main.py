@@ -41,13 +41,14 @@ async def log_request_data(request: Request, call_next):
     start_time = time.time()
     response = await call_next(request)
     process_time = time.time() - start_time
+    client_ip = request.headers.get("x-forwarded-for", request.client.host).split(",")[0].strip()
 
     log_entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "endpoint": request.url.path,
         "status_code": response.status_code,
         "backend_time_ms": round(process_time * 1000, 2),
-        "client_ip": request.client.host,
+        "client_ip": client_ip,
         "method": request.method
     }
 
