@@ -320,7 +320,7 @@ async def external_service_links(
 
         MAX_SIZE = 500  # max width or height in pixels
         
-        image_path = None
+        external_image_path = None
         if image:
             ext = os.path.splitext(image.filename)[1].lower()
             if ext not in {".png", ".jpeg", ".jpg", ".svg"}:
@@ -328,17 +328,19 @@ async def external_service_links(
 
             contents = await image.read()
             image_uuid = uuid.uuid4()
-            media_dir = "/fastapi-media/service-images"
-            os.makedirs(media_dir, exist_ok=True)
-            image_path = os.path.join(media_dir, f"{image_uuid}{ext}")
+            external_media_dir = "/service-images"
+            internal_media_dir = f"/fastapi-media{external_media_dir}"
+            os.makedirs(internal_media_dir, exist_ok=True)
+            external_image_path = os.path.join(external_media_dir, f"{image_uuid}{ext}")
+            internal_image_path = os.path.join(internal_media_dir, f"{image_uuid}{ext}")
 
             if ext != ".svg":
                 img = Image.open(BytesIO(contents))
                 img.thumbnail((MAX_SIZE, MAX_SIZE))  # resizes preserving aspect ratio
-                img.save(image_path)  # optionally choose a standard format like PNG
+                img.save(internal_image_path)  # optionally choose a standard format like PNG
             else:
                 # Save SVG as-is
-                with open(image_path, "wb") as f:
+                with open(internal_image_path, "wb") as f:
                     f.write(contents)
                     
         create_entry_query = """
@@ -346,7 +348,7 @@ async def external_service_links(
             (user_id, name, link, description, image_path)
             VALUES (%s, %s, %s, %s, %s);
         """
-        create_entry_params = (user_id, name, link, description, image_path)
+        create_entry_params = (user_id, name, link, description, external_image_path)
         await query_aiomysql(conn, create_entry_query, create_entry_params)
 
         return {"message": f'External service link "{name}" created successfully!'}
@@ -374,19 +376,19 @@ async def update_external_service_link(
         if not existing_rows:
             raise HTTPException(status_code=404, detail="Service link not found")
 
-        existing = existing_rows[0]
-        old_image_path = existing["image_path"]
-        image_path = old_image_path
+        old_external_path = existing_rows[0]["image_path"]
+        old_internal_path = os.path.join("/fastapi-media", old_external_path) if old_external_path else None
+        new_external_path = old_external_path  # default to existing
 
         if remove_image:
-            if old_image_path and os.path.exists(old_image_path):
-                os.remove(old_image_path)
-            image_path = None
+            if old_internal_path and os.path.exists(old_internal_path):
+                os.remove(old_internal_path)
+            new_external_path = None
 
         elif image:
             # Delete old image if exists
-            if old_image_path and os.path.exists(old_image_path):
-                os.remove(old_image_path)
+            if old_internal_path and os.path.exists(old_internal_path):
+                os.remove(old_internal_path)
 
             ext = os.path.splitext(image.filename)[1].lower()
             if ext not in {".png", ".jpeg", ".jpg", ".svg"}:
@@ -394,16 +396,19 @@ async def update_external_service_link(
 
             contents = await image.read()
             image_uuid = uuid.uuid4()
-            media_dir = "/fastapi-media/service-images"
-            os.makedirs(media_dir, exist_ok=True)
-            image_path = os.path.join(media_dir, f"{image_uuid}{ext}")
+            external_media_dir = "/service-images"
+            internal_media_dir = f"/fastapi-media{external_media_dir}"
+            os.makedirs(internal_media_dir, exist_ok=True)
+
+            new_external_path = os.path.join(external_media_dir, f"{image_uuid}{ext}")
+            internal_path = os.path.join(internal_media_dir, f"{image_uuid}{ext}")
 
             if ext != ".svg":
                 img = Image.open(BytesIO(contents))
                 img.thumbnail((500, 500))
-                img.save(image_path)
+                img.save(internal_path)
             else:
-                with open(image_path, "wb") as f:
+                with open(internal_path, "wb") as f:
                     f.write(contents)
 
         update_query = """
@@ -414,12 +419,10 @@ async def update_external_service_link(
         await query_aiomysql(
             conn,
             update_query,
-            (name, link, description, image_path, link_id, user_id),
+            (name, link, description, new_external_path, link_id, user_id),
         )
 
         return {"message": f'External service link "{name}" updated successfully!'}
-
-
 
 # Note: If a user is deleted, linked images remain on disk since the links are cascade-deleted.
 # This isn't critical, and handling it would add unnecessary complexity considering the scope of the project.
