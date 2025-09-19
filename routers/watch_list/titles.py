@@ -29,6 +29,7 @@ from .utils import (
     convert_season_or_episode_id_to_title_id,
     format_FI_age_rating,
     tmdb_to_title_id,
+    map_title_row,
 )
 
 # Semaphore to limit concurrent tasks with heavy disk usage
@@ -1339,19 +1340,17 @@ async def list_titles(
         title_limit=title_limit + 1
     )
 
-    results = await query_aiomysql(conn, query, tuple(query_params), use_dictionary=True)
+    titles = await query_aiomysql(conn, query, tuple(query_params), use_dictionary=True)
 
     conn.close()
 
-    has_more = len(results) > title_limit
-    results = results[:title_limit]
+    has_more = len(titles) > title_limit
+    titles = titles[:title_limit]
 
-    for row in results:
-        row["collections"] = row["collections"].split(", ") if row["collections"] else []
-        row["genres"] = row["genres"].split(", ") if row["genres"] else []
+    titles = [map_title_row(row) for row in titles]
 
     return {
-        "titles": results,
+        "titles": titles,
         "has_more": has_more,
         "offset": offset,
     }
@@ -1378,10 +1377,7 @@ async def get_showcase(
         title_limit=5,
     )
     titles = await query_aiomysql(conn, query, query_params)
-
-    # Split the collections
-    for row in titles:
-        row["collections"] = row["collections"].split(", ") if row["collections"] else []
+    titles = [map_title_row(row) for row in titles]
 
     return titles
 

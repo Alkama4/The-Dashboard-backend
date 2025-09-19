@@ -1,6 +1,6 @@
 # External imports
 from typing import Optional
-import os
+import json
 
 # Internal imports
 from utils import (
@@ -47,23 +47,12 @@ def build_titles_query(
     # Base query
     query = """
         SELECT
-            t.title_id,
-            t.tmdb_id,
-            t.name,
-            t.name_original,
-            t.tmdb_vote_average,
-            t.tmdb_vote_count,
-            t.movie_runtime,
-            COALESCE(utd.watch_count, 0) AS watch_count,
-            t.type,
-            t.release_date,
-            t.backup_poster_url,
-            t.overview,
-            t.age_rating,
+            t.*,
             (SELECT COUNT(season_id) FROM seasons WHERE title_id = t.title_id) AS season_count,
             (SELECT COUNT(episode_id) FROM episodes WHERE title_id = t.title_id) AS episode_count,
             utd.favourite,
             utd.last_updated,
+            utd.watch_count,
             CASE
                 WHEN t.type = 'tv' THEN
                     EXISTS (
@@ -91,10 +80,20 @@ def build_titles_query(
                 END
                 ORDER BY uc.name ASC SEPARATOR ', '
             ) AS collections,
-            GROUP_CONCAT(
-                DISTINCT g.genre_name
-                ORDER BY g.genre_name ASC SEPARATOR ', '
-            ) AS genres
+            GROUP_CONCAT(DISTINCT g.genre_name ORDER BY g.genre_name SEPARATOR ', ') AS genres,
+            (SELECT JSON_ARRAYAGG(
+                JSON_OBJECT(
+                    'image_id', ti.image_id,
+                    'type', ti.type,
+                    'format', ti.format,
+                    'position', ti.position,
+                    'is_primary', ti.is_primary,
+                    'source_url', ti.source_url
+                )
+            )
+            FROM title_images ti
+            WHERE ti.title_id = t.title_id
+            ) AS title_images
         FROM
             titles t
         LEFT JOIN
@@ -253,6 +252,20 @@ def build_titles_query(
         query_params.extend([title_limit, offset * title_limit])
 
     return query, query_params
+
+
+def map_title_row(row):
+    row["collections"] = row["collections"].split(", ") if row["collections"] else []
+    row["genres"] = row["genres"].split(", ") if row["genres"] else []
+
+    title_images = json.loads(row["title_images"]) if row["title_images"] else []
+    title_images_dict = {}
+    for img in title_images:
+        img_obj = img.copy()
+        img_obj["path"] = f"/image/title/{row['title_id']}/{img['image_id']}.{img['format']}"
+        title_images_dict.setdefault(img["type"], []).append(img_obj)
+    row["title_images"] = title_images_dict
+    return row
 
 
 
