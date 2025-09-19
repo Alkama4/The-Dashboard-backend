@@ -108,7 +108,7 @@ async def delete_collection(collection_id: int, data: dict):
 
 
 @router.get("")
-async def list_collections(session_key: str = Query(...)):
+async def list_collections(session_key: str = Query(None)):
 
     conn = await aiomysql_connect()
     user_id = await validate_session_key_conn(conn, session_key)
@@ -151,6 +151,77 @@ async def list_collections(session_key: str = Query(...)):
             roots.append(collection)
 
     return roots
+
+@router.get("/{collection_id}")
+async def get_collection(
+    collection_id: int,
+    session_key: str = Query(None)
+):
+    conn = await aiomysql_connect()
+    user_id = await validate_session_key_conn(conn, session_key)
+
+    query = """
+        SELECT
+            collection_id,
+            name,
+            description,
+            parent_collection_id
+        FROM user_collection
+        WHERE user_id = %s
+            AND (collection_id = %s OR parent_collection_id = %s)
+    """
+    result = await query_aiomysql(conn, query, (user_id, collection_id, collection_id))
+    if not result:
+        conn.close()
+        return None
+
+    # Separate parent from children
+    parent = None
+    children = []
+    for row in result:
+        if row['collection_id'] == collection_id:
+            parent = {**row, 'titles': [], 'children': []}
+        else:
+            children.append({**row, 'titles': [], 'children': []})
+
+    if not parent:
+        conn.close()
+        return None
+
+    # Attach children to parent
+    parent['children'] = children
+
+    # Fetch titles for parent
+    query, query_params = build_titles_query(
+        user_id,
+        collection_id=parent['collection_id'],
+        sort_by='release_date',
+        direction='ASC',
+        offset=0,
+    )
+    titles = await query_aiomysql(conn, query, tuple(query_params))
+    for row in titles:
+        row["collections"] = row["collections"].split(", ") if row["collections"] else []
+    parent['titles'] = titles
+
+    # Fetch titles for each child
+    for child in children:
+        query, query_params = build_titles_query(
+            user_id,
+            collection_id=child['collection_id'],
+            sort_by='release_date',
+            direction='ASC',
+            offset=0,
+        )
+        titles = await query_aiomysql(conn, query, tuple(query_params))
+        for row in titles:
+            row["collections"] = row["collections"].split(", ") if row["collections"] else []
+        child['titles'] = titles
+
+    conn.close()
+    return parent
+
+
 
 
 @router.put("/{collection_id}/title/{title_id}")
