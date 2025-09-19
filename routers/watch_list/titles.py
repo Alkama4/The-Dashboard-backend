@@ -4,14 +4,15 @@ from typing import Optional
 from pathlib import Path
 import json
 import os
+import io
 import re
 import asyncio
 import httpx
 import subprocess
 from difflib import SequenceMatcher
+import colorgram
 
 # Internal imports
-from custom_values import custom_combined_links
 from utils import (
     fetch_user_settings,
     validate_session_key_conn,
@@ -21,11 +22,10 @@ from utils import (
     query_omdb,
     query_tmdb,
     download_image,
+    MEDIA_BASE_PATH
 )
 from .utils import (
     build_titles_query,
-    get_backdrop_count,
-    get_logo_type,
     convert_season_or_episode_id_to_title_id,
     format_FI_age_rating,
     tmdb_to_title_id,
@@ -37,60 +37,58 @@ semaphore = asyncio.Semaphore(5)
 router = APIRouter()
 
 
-# ############## STORE IMAGES ##############
+# ############## STORE IMAGES WITH DB ##############
 
-# Used to get the images for a title and only the title. Seasons and episodes have a seperate one
-async def store_title_images(title_images, title_id: str, replace_images = False):
+# ---------- Title Images ----------
+async def store_title_images(conn, title_images, title_id: int, replace_images=False):
     try:
         base_path = f'/fastapi-media/title/{title_id}'
         Path(base_path).mkdir(parents=True, exist_ok=True)
-
         tasks = []
 
-        # Get the first logo
-        if 'logos' in title_images:
-            logo = title_images['logos'][:1]  # Get only the first logo
-            for idx, image in enumerate(logo):
-                image_url = f"https://image.tmdb.org/t/p/original{image['file_path']}"
-                file_extension = image['file_path'].split('.')[-1]
-                image_filename = f"logo.{file_extension}"
-                image_save_path = os.path.join(base_path, image_filename)
-                tasks.append(download_image(image_url, image_save_path, replace_images))
+        async def _save_image_to_db(image_type, source_url, position=1, is_primary=False):
+            ext = source_url.split('.')[-1].lower()
+            query = """
+                INSERT INTO title_images (title_id, type, position, is_primary, source_url, format)
+                VALUES (%s, %s, %s, %s, %s, %s) AS new
+                ON DUPLICATE KEY UPDATE 
+                    source_url = new.source_url,
+                    is_primary = new.is_primary,
+                    format = new.format
+            """
+            await query_aiomysql(conn, query, (title_id, image_type, position, is_primary, source_url, ext))
+            row = await query_aiomysql(conn,
+                "SELECT image_id FROM title_images WHERE title_id=%s AND type=%s AND position=%s",
+                (title_id, image_type, position))
+            return row[0]['image_id']
 
-        # Get the first poster
+        # Logos
+        if 'logos' in title_images:
+            for image in title_images['logos'][:1]:
+                source_url = f"https://image.tmdb.org/t/p/original{image['file_path']}"
+                image_id = await _save_image_to_db('logo', source_url)
+                ext = source_url.split('.')[-1].lower()
+                tasks.append(download_image(source_url, os.path.join(base_path, f"{image_id}.{ext}"), replace_images))
+
+        # Posters
         if 'posters' in title_images:
-            # Try English first
-            posters = [img for img in title_images['posters'] if img.get('iso_639_1') == 'en']
-            
-            # Fallback to Finnish if no English posters
-            if not posters:
-                posters = [img for img in title_images['posters'] if img.get('iso_639_1') == 'fi']
-            
+            posters = [img for img in title_images['posters'] if img.get('iso_639_1') in ('en', 'fi')]
             if posters:
                 first_poster = posters[0]
-                image_url = f"https://image.tmdb.org/t/p/original{first_poster['file_path']}"
-                file_extension = first_poster['file_path'].split('.')[-1]
-                image_filename = f"poster.{file_extension}"
-                image_save_path = os.path.join(base_path, image_filename)
-                tasks.append(download_image(image_url, image_save_path, replace_images))
+                source_url = f"https://image.tmdb.org/t/p/original{first_poster['file_path']}"
+                image_id = await _save_image_to_db('poster', source_url)
+                ext = source_url.split('.')[-1].lower()
+                tasks.append(download_image(source_url, os.path.join(base_path, f"{image_id}.{ext}"), replace_images))
 
-        # Get the first 5 backdrops
+        # Backdrops
         if 'backdrops' in title_images:
-            backdrops = [
-                image for image in title_images['backdrops']
-                if image.get('iso_639_1') is None
-            ][:5]  # Only get first 5 with iso_639_1 == None
+            for idx, image in enumerate([img for img in title_images['backdrops'] if img.get('iso_639_1') is None][:5]):
+                source_url = f"https://image.tmdb.org/t/p/original{image['file_path']}"
+                image_id = await _save_image_to_db('backdrop', source_url, position=idx+1)
+                ext = source_url.split('.')[-1].lower()
+                tasks.append(download_image(source_url, os.path.join(base_path, f"{image_id}.{ext}"), replace_images))
 
-            for idx, image in enumerate(backdrops):
-                image_url = f"https://image.tmdb.org/t/p/original{image['file_path']}"
-                file_extension = image['file_path'].split('.')[-1]
-                image_filename = f"backdrop{idx + 1}.{file_extension}"
-                image_save_path = os.path.join(base_path, image_filename)
-                tasks.append(download_image(image_url, image_save_path, replace_images))
-
-        # Run all the download tasks concurrently
         await asyncio.gather(*tasks)
-
         return {"success": True}
 
     except Exception as e:
@@ -98,33 +96,42 @@ async def store_title_images(title_images, title_id: str, replace_images = False
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
-async def store_season_images(tv_seasons, title_id: str, replace_images = False):
+# ---------- Season Images ----------
+async def store_season_images(conn, tv_seasons, title_id: int, replace_images=False):
     try:
         tasks = []
 
-        for season in tv_seasons:
-            season_number = season.get("season_number")
-            poster_path = season.get("poster_path")
+        async def _save_image_to_db(season_id, source_url, position=1, is_primary=False):
+            ext = source_url.split('.')[-1].lower()
+            query = """
+                INSERT INTO season_images (season_id, type, position, is_primary, source_url, format)
+                VALUES (%s, 'poster', %s, %s, %s, %s) AS new
+                ON DUPLICATE KEY UPDATE 
+                    source_url = new.source_url,
+                    is_primary = new.is_primary,
+                    format = new.format
+            """
+            await query_aiomysql(conn, query, (season_id, position, is_primary, source_url, ext))
+            row = await query_aiomysql(conn,
+                "SELECT image_id FROM season_images WHERE season_id=%s AND type='poster' AND position=%s",
+                (season_id, position))
+            return row[0]['image_id']
 
-            if not poster_path or season_number == 0:  # Skip if no poster exists or if specials
+        for season in tv_seasons:
+            season_id = season.get("season_id")
+            poster_path = season.get("poster_path")
+            if not poster_path or season.get("season_number") == 0:
                 continue
 
-            # Define base path for season
-            season_path = f'/fastapi-media/title/{title_id}/season{season_number}'
+            season_path = f'/fastapi-media/title/{title_id}/season/{season_id}'
             Path(season_path).mkdir(parents=True, exist_ok=True)
 
-            # Construct image URL & save path
-            image_url = f"https://image.tmdb.org/t/p/original{poster_path}"
-            file_extension = poster_path.split('.')[-1]
-            image_filename = f"poster.{file_extension}"
-            image_save_path = os.path.join(season_path, image_filename)
+            source_url = f"https://image.tmdb.org/t/p/original{poster_path}"
+            image_id = await _save_image_to_db(season_id, source_url)
+            ext = source_url.split('.')[-1].lower()
+            tasks.append(download_image(source_url, os.path.join(season_path, f"{image_id}.{ext}"), replace_images))
 
-            # Add download task
-            tasks.append(download_image(image_url, image_save_path, replace_images))
-
-        # Run all the download tasks concurrently
         await asyncio.gather(*tasks)
-
         return {"success": True}
 
     except Exception as e:
@@ -132,39 +139,76 @@ async def store_season_images(tv_seasons, title_id: str, replace_images = False)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
-async def store_episode_images(tv_episodes, title_id: str, replace_images = False):
+# ---------- Episode Images ----------
+async def store_episode_images(conn, tv_episodes, title_id: int, replace_images=False):
     try:
         tasks = []
 
+        async def _save_image_to_db(episode_id, source_url, position=1, is_primary=False):
+            ext = source_url.split('.')[-1].lower()
+            query = """
+                INSERT INTO episode_images (episode_id, type, position, is_primary, source_url, format)
+                VALUES (%s, 'still', %s, %s, %s, %s) AS new
+                ON DUPLICATE KEY UPDATE 
+                    source_url = new.source_url,
+                    is_primary = new.is_primary,
+                    format = new.format
+            """
+            await query_aiomysql(conn, query, (episode_id, position, is_primary, source_url, ext))
+            row = await query_aiomysql(conn,
+                "SELECT image_id FROM episode_images WHERE episode_id=%s AND type='still' AND position=%s",
+                (episode_id, position))
+            return row[0]['image_id']
+        
         for episode in tv_episodes:
-            season_number = episode.get("season_number")
-            episode_number = episode.get("episode_number")
+            episode_id = episode.get("episode_id")
+            season_id = episode.get("season_id")
             still_path = episode.get("still_path")
-
-            if not still_path:  # Skip if no still image exists
+            if not still_path:
                 continue
 
-            # Define base path for the episode image
-            episode_path = f'/fastapi-media/title/{title_id}/season{season_number}'
+            episode_path = f'/fastapi-media/title/{title_id}/season/{season_id}/episode/{episode_id}'
             Path(episode_path).mkdir(parents=True, exist_ok=True)
 
-            # Construct image URL & save path
-            image_url = f"https://image.tmdb.org/t/p/original{still_path}"
-            file_extension = still_path.split('.')[-1]
-            image_filename = f"episode{episode_number}.{file_extension}"
-            image_save_path = os.path.join(episode_path, image_filename)
+            source_url = f"https://image.tmdb.org/t/p/original{still_path}"
+            image_id = await _save_image_to_db(episode_id, source_url, position=episode.get("episode_number"))
+            ext = source_url.split('.')[-1].lower()
+            tasks.append(download_image(source_url, os.path.join(episode_path, f"{image_id}.{ext}"), replace_images))
 
-            # Add download task
-            tasks.append(download_image(image_url, image_save_path, replace_images))
-
-        # Run all the download tasks concurrently
         await asyncio.gather(*tasks)
-
         return {"success": True}
 
     except Exception as e:
         print(f"store_episode_images error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+
+
+async def _extract_and_store_title_image_colors(conn, title_id):
+
+    title_dir = os.path.join(MEDIA_BASE_PATH, "/title/", title_id)
+
+    images = ['poster.jpg', 'backdrop1.jpg', 'backdrop2.jpg', 'backdrop3.jpg', 'backdrop4.jpg', 'backdrop5.jpg']
+
+    for image in images:
+        image_path = os.path.join(title_dir, image)
+        
+        # Check if file exists
+
+        # Read the file and downscale it to a width of 100
+
+        # From the downsclaed image extract colors:
+        colors = colorgram.extract(io.BytesIO(image_bytes), 4)
+
+        # Store the colors so that we can easily push them to db
+
+
+    query = """
+        INSERT INTO 
+    """
+    query_aiomysql(conn, query, params)
+
 
 
 
@@ -534,7 +578,7 @@ async def add_or_update_movie_title(
 
     # Store the title related images
     # Handle the replacement check for each image. If we were to check also here it wouldn't automatically update missing images.
-    await store_title_images(title_images_data, title_id, update_title_images)
+    await store_title_images(conn, title_images_data, title_id, update_title_images)
     
     return title_id
 
@@ -569,28 +613,19 @@ async def add_or_update_tv_title(
                 elif release['iso_3166_1'] == 'US' and release['rating']:
                     us_tv_title_age_rating = release['rating']
 
-            if tv_title_age_rating == None:
-                if us_tv_title_age_rating:
-                    tv_title_age_rating = us_tv_title_age_rating
-                else:
-                    tv_title_age_rating = ""
+            if tv_title_age_rating is None:
+                tv_title_age_rating = us_tv_title_age_rating or ""
 
-            # Retrieve the youtube trailer key
-            tv_title_trailers_youtube_ids = []
-            for video in tv_title_info["videos"]["results"]:
-                if video["site"] == "YouTube" and video["type"] == "Trailer":
-                    tv_title_trailers_youtube_ids.append(video["key"])
+            tv_title_trailers_youtube_ids = [
+                video["key"] for video in tv_title_info["videos"]["results"]
+                if video["site"] == "YouTube" and video["type"] == "Trailer"
+            ]
 
-            # Retrieve the imdb id seperately since it's not part of the base query like in movies
             imdb_id = tv_title_info.get('external_ids', {}).get('imdb_id')
+            tv_title_production_countries = ", ".join(
+                country["name"] for country in tv_title_info.get('production_countries', [])
+            )
 
-            # Retrieve the production countries and just add them up to a list
-            tv_title_production_countries = ""
-            for country in tv_title_info.get('production_countries', []):
-                if tv_title_production_countries:
-                    tv_title_production_countries += ", "
-                tv_title_production_countries += country["name"]
-                
             tv_title_params = (
                 tv_title_info.get('id'),
                 imdb_id,
@@ -652,7 +687,6 @@ async def add_or_update_tv_title(
 
             # Set id fetch to False since it often fails
             title_id = await query_aiomysql(conn, tv_title_query, tv_title_params, return_lastrowid=True)
-
             if not title_id or title_id == 0:
                 # Retrieve the generated titles id
                 title_id = await tmdb_to_title_id(conn, tmdb_id)
@@ -666,14 +700,9 @@ async def add_or_update_tv_title(
             # OMDB query to get more info
             await get_extra_info_from_omdb(conn, imdb_id, title_id)
 
-
             # - - - SEASONS - - - 
             # The Season data comes automatically from the tv-shows title query so these are handled with the update_title_data
             tv_seasons_params = []
-            season_images_data = {
-                "title_id": title_id,
-                "seasons": []
-            }
 
             for season in tv_title_info.get('seasons', []):
                 if season.get('season_number') == 0:  # Skip season 0 (specials)
@@ -691,15 +720,6 @@ async def add_or_update_tv_title(
                     season.get('poster_path'),
                 ))
 
-                # Add season poster data for image storage
-                if season.get("poster_path"):  # Only add if poster exists
-                    season_images_data = [
-                        {"season_number": season["season_number"], "poster_path": season["poster_path"]}
-                        for season in tv_title_info.get("seasons", [])
-                        if season.get("poster_path")  # Only include valid posters
-                    ]
-
-            # Insert into the database if there are valid seasons
             if tv_seasons_params:
                 placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s, %s, %s)"] * len(tv_seasons_params))
                 query = f"""
@@ -724,11 +744,22 @@ async def add_or_update_tv_title(
             # Set the images for 
             title_images_data = tv_title_info.get('images')
 
+            # Fetch season IDs to build images array
+            season_id_query = "SELECT season_id, season_number FROM seasons WHERE title_id=%s"
+            season_id_rows = await query_aiomysql(conn, season_id_query, (title_id,), use_dictionary=False)
+            season_id_map = {row[1]: row[0] for row in season_id_rows}
 
-        # If we aren't updating info and just updating images
+            season_images_data = [
+                {
+                    "season_number": season["season_number"],
+                    "poster_path": season["poster_path"],
+                    "season_id": season_id_map.get(season["season_number"])
+                }
+                for season in tv_title_info.get("seasons", [])
+                if season.get("season_number") != 0 and season.get("poster_path")
+            ]
+
         elif update_title_images:
-
-            # Get the title_id with the tmdb_id from mysql
             title_id = await tmdb_to_title_id(conn, tmdb_id)
 
             # query just for the images and and general data for seasons images 
@@ -740,28 +771,29 @@ async def add_or_update_tv_title(
             # Title images data
             title_images_data = tv_title_info.get('images')
 
-            # Season images data
-            season_images_data = {
-                "title_id": title_id,
-                "seasons": []
-            }
-            for season in tv_title_info.get('seasons', []):
-                if season.get('season_number') == 0:  # Skip season 0 (specials)
-                    continue
-                elif season.get("poster_path"):  # Only add if poster exists
-                    season_images_data = [
-                        {"season_number": season["season_number"], "poster_path": season["poster_path"]}
-                        for season in tv_title_info.get("seasons", [])
-                        if season.get("poster_path")  # Only include valid posters
-                    ]
+            # Fetch season IDs from the database
+            season_id_query = "SELECT season_id, season_number FROM seasons WHERE title_id=%s"
+            season_id_rows = await query_aiomysql(conn, season_id_query, (title_id,), use_dictionary=False)
+            season_id_map = {row[1]: row[0] for row in season_id_rows}
+
+            # Add season_id to the images data
+            season_images_data = [
+                {
+                    "season_number": season["season_number"],
+                    "poster_path": season["poster_path"],
+                    "season_id": season_id_map.get(season["season_number"])
+                }
+                for season in tv_title_info.get("seasons", [])
+                if season.get("season_number") != 0 and season.get("poster_path")
+            ]
 
         # Do not check for the update_title_images since it's handled in the download image function.
         # Instead just run them when ever anything is updated in the titles data with the parameter given to it.
 
         # Setup the title images to download in the background
-        await store_title_images(title_images_data, title_id, update_title_images)
+        await store_title_images(conn, title_images_data, title_id, update_title_images)
         # Setup the season images to download in the background
-        await store_season_images(season_images_data, title_id, update_title_images)
+        await store_season_images(conn, season_images_data, title_id, update_title_images)
     
     # Else if we didn't run any of the title related code get the title_id for episodes here
     elif update_season_info or update_season_images:
@@ -829,6 +861,7 @@ async def add_or_update_tv_title(
                     if episode.get("still_path"):
                         episode_images_data.append({
                             "season_number": season_number,
+                            "season_id": season_id,
                             "episode_number": episode.get("episode_number"),
                             "still_path": episode.get("still_path")
                         })
@@ -855,8 +888,25 @@ async def add_or_update_tv_title(
             flat_values = [item for sublist in tv_episodes_params for item in sublist]
             await query_aiomysql(conn, query, flat_values)
 
+        # Fetch episode IDs from the database
+        episode_id_query = """
+            SELECT episode_id, season_id, episode_number
+            FROM episodes
+            WHERE title_id = %s
+        """
+        episode_id_rows = await query_aiomysql(conn, episode_id_query, (title_id,), use_dictionary=False)
+        # Map season_id + episode_number to episode_id
+        episode_id_map = {(row[1], row[2]): row[0] for row in episode_id_rows}
+
+        # Add episode_id to episode_images_data
+        for ep in episode_images_data:
+            season_number = ep["season_number"]
+            episode_number = ep["episode_number"]
+            season_id = season_id_map.get(season_number)
+            ep["episode_id"] = episode_id_map.get((season_id, episode_number))
+
         # Setup the episode images to download in the background
-        await store_episode_images(episode_images_data, title_id, update_season_images)
+        await store_episode_images(conn, episode_images_data, title_id, update_season_images)
 
     # Finally return the title_id for later use
     return title_id
@@ -1298,6 +1348,7 @@ async def list_titles(
 
     for row in results:
         row["collections"] = row["collections"].split(", ") if row["collections"] else []
+        row["genres"] = row["genres"].split(", ") if row["genres"] else []
 
     return {
         "titles": results,
@@ -1331,7 +1382,6 @@ async def get_showcase(
     # Split the collections
     for row in titles:
         row["collections"] = row["collections"].split(", ") if row["collections"] else []
-        row["logo_file_type"] = get_logo_type(row["title_id"])
 
     return titles
 
@@ -1341,119 +1391,136 @@ async def get_title_info(
     title_id: int,
     session_key: str = Query(...),
 ):
-    # Setup connection
-    conn = await aiomysql_connect()
+    async with aiomysql_conn_get() as conn:
 
-    # Get user_id and validate session key
-    user_id = await validate_session_key_conn(conn, session_key, False)
+        # --- Validate session ---
+        user_id = await validate_session_key_conn(conn, session_key, False)
 
-    # Combined title, collections, and trailers query
-    get_titles_query = """
-        SELECT 
-            t.*, 
-            utd.watch_count, 
-            utd.notes, 
-            utd.favourite, 
-            utd.last_updated AS user_title_last_updated,
-            utd.title_id IS NOT NULL AS in_watch_list,
-            GROUP_CONCAT(DISTINCT g.genre_name ORDER BY g.genre_name SEPARATOR ', ') AS genres,
-            -- Subquery for collections
-            (SELECT JSON_ARRAYAGG(
-                JSON_OBJECT('collection_id', uc.collection_id, 'name', uc.name, 'description', uc.description)
-            ) FROM user_collection uc
-            INNER JOIN collection_title ct ON ct.collection_id = uc.collection_id
-            WHERE ct.title_id = t.title_id AND uc.user_id = %s) AS collections,
-            -- Subquery for trailers
-            (SELECT JSON_ARRAYAGG(
-                JSON_OBJECT('trailer_key', youtube_id, 'video_name', video_name, 'is_default', is_default)
-            ) FROM title_trailers
-            WHERE title_id = t.title_id) AS trailers
-        FROM titles t
-        LEFT JOIN user_title_details utd ON utd.title_id = t.title_id AND utd.user_id = %s
-        LEFT JOIN title_genres tg ON t.title_id = tg.title_id
-        LEFT JOIN genres g ON tg.genre_id = g.genre_id
-        WHERE t.title_id = %s
-        GROUP BY t.title_id, utd.watch_count, utd.notes, utd.favourite, utd.last_updated, utd.title_id;
-    """
-    title_query_results = await query_aiomysql(conn, get_titles_query, (user_id, user_id, title_id))
-    if not title_query_results:
-        raise HTTPException(status_code=404, detail="The title doesn't exist.")
-    title_data = title_query_results[0]
-
-    # Add custom links and other properties
-    title_media_details = await get_title_media_details(conn, title_id)
-
-    # Final assembled data
-    title_info = {
-        **title_data,
-        "genres": title_data["genres"].split(", ") if title_data["genres"] else [],
-        "collections": json.loads(title_data["collections"]) if title_data["collections"] else [],
-        "backdrop_image_count": get_backdrop_count(title_data["title_id"]),
-        "title_media": title_media_details["title"],
-        "trailers": json.loads(title_data["trailers"]) if title_data["trailers"] else [],
-    }
-
-    # Query and append extra tv-series related info to title_info
-    if title_info["type"] == "tv":
-        # Get seasons
-        get_seasons_query = """
+        # --- Main title query ---
+        get_titles_query = """
             SELECT 
-                season_id, 
-                season_number, 
-                season_name, 
-                tmdb_vote_average, 
-                tmdb_vote_count, 
-                episode_count, 
-                overview, 
-                backup_poster_url
+                t.*, 
+                utd.watch_count, 
+                utd.notes, 
+                utd.favourite, 
+                utd.last_updated AS user_title_last_updated,
+                utd.title_id IS NOT NULL AS in_watch_list,
+                GROUP_CONCAT(DISTINCT g.genre_name ORDER BY g.genre_name SEPARATOR ', ') AS genres,
+                (SELECT JSON_ARRAYAGG(
+                    JSON_OBJECT('collection_id', uc.collection_id, 'name', uc.name, 'description', uc.description)
+                ) FROM user_collection uc
+                INNER JOIN collection_title ct ON ct.collection_id = uc.collection_id
+                WHERE ct.title_id = t.title_id AND uc.user_id = %s) AS collections,
+                (SELECT JSON_ARRAYAGG(
+                    JSON_OBJECT('trailer_key', youtube_id, 'video_name', video_name, 'is_default', is_default)
+                ) FROM title_trailers
+                WHERE title_id = t.title_id) AS trailers
+            FROM titles t
+            LEFT JOIN user_title_details utd ON utd.title_id = t.title_id AND utd.user_id = %s
+            LEFT JOIN title_genres tg ON t.title_id = tg.title_id
+            LEFT JOIN genres g ON tg.genre_id = g.genre_id
+            WHERE t.title_id = %s
+            GROUP BY t.title_id, utd.watch_count, utd.notes, utd.favourite, utd.last_updated, utd.title_id;
+        """
+        title_query_results = await query_aiomysql(conn, get_titles_query, (user_id, user_id, title_id))
+        if not title_query_results:
+            raise HTTPException(status_code=404, detail="The title doesn't exist.")
+        title_data = title_query_results[0]
+
+        # --- Parse trailers and collections ---
+        title_data["trailers"] = json.loads(title_data["trailers"]) if title_data["trailers"] else []
+        title_data["collections"] = json.loads(title_data["collections"]) if title_data["collections"] else []
+        title_data["genres"] = title_data["genres"].split(", ") if title_data["genres"] else []
+
+        # --- Title media ---
+        title_media_details = await get_title_media_details(conn, title_id)
+        title_data["title_media"] = title_media_details["title"]
+
+        # --- Title images as dict by type ---
+        get_title_images_query = "SELECT image_id, type, format, position, is_primary, source_url FROM title_images WHERE title_id=%s"
+        title_images = await query_aiomysql(conn, get_title_images_query, (title_id,))
+
+        title_images_dict = {}
+        for img in title_images:
+            img_obj = {
+                "image_id": img["image_id"],
+                "position": img["position"],
+                "is_primary": img["is_primary"],
+                "source_url": img["source_url"],
+                "path": f"/image/title/{title_id}/{img['image_id']}.{img['format']}"
+            }
+            if img["type"] not in title_images_dict:
+                title_images_dict[img["type"]] = []
+            title_images_dict[img["type"]].append(img_obj)
+
+        title_data["title_images"] = title_images_dict
+
+        # --- Seasons ---
+        get_seasons_query = """
+            SELECT season_id, season_number, season_name, tmdb_vote_average, tmdb_vote_count,
+                episode_count, overview, backup_poster_url
             FROM seasons
-            WHERE title_id = %s
-            ORDER BY CASE WHEN season_number = 0 THEN 999 ELSE season_number END
+            WHERE title_id=%s
+            ORDER BY CASE WHEN season_number=0 THEN 999 ELSE season_number END
         """
         seasons = await query_aiomysql(conn, get_seasons_query, (title_id,))
 
-        # Get Episodes
+        for season in seasons:
+            # Season images
+            get_season_images_query = "SELECT image_id, type, format, position, is_primary, source_url FROM season_images WHERE season_id=%s"
+            season_images = await query_aiomysql(conn, get_season_images_query, (season["season_id"],))
+            season["season_images"] = [
+                {
+                    "image_id": img["image_id"],
+                    "type": img["type"],
+                    "position": img["position"],
+                    "is_primary": img["is_primary"],
+                    "source_url": img["source_url"],
+                    "path": f"/image/title/{title_id}/season/{season['season_id']}/{img['image_id']}.{img['format']}"
+                } for img in season_images
+            ]
+
+        # --- Episodes ---
         get_episodes_query = """
-            SELECT 
-                e.season_id, 
-                e.episode_id, 
-                e.episode_number, 
-                e.episode_name, 
-                e.tmdb_vote_average, 
-                e.tmdb_vote_count, 
-                e.overview, 
-                e.backup_still_url, 
-                e.air_date, 
-                e.runtime, 
+            SELECT e.season_id, e.episode_id, e.episode_number, e.episode_name, e.tmdb_vote_average,
+                e.tmdb_vote_count, e.overview, e.backup_still_url, e.air_date, e.runtime,
                 COALESCE(ued.watch_count, 0) AS watch_count
             FROM episodes e
-            LEFT JOIN user_episode_details ued 
-                ON e.episode_id = ued.episode_id 
-                AND ued.user_id = %s
-            WHERE e.title_id = %s
-            ORDER BY e.season_id, e.episode_number;
+            LEFT JOIN user_episode_details ued ON e.episode_id = ued.episode_id AND ued.user_id=%s
+            WHERE e.title_id=%s
+            ORDER BY e.season_id, e.episode_number
         """
         episodes = await query_aiomysql(conn, get_episodes_query, (user_id, title_id))
 
-        # Build a quick lookup for media items by episode_id
+        # Attach episode images and media
         media_by_episode = {}
         for media in title_media_details["episodes"]:
             media_by_episode.setdefault(media["episode_id"], []).append(media)
 
-        # Create a season map that already contains the season data
-        season_map = {s["season_id"]: {**s, "episodes": []} for s in seasons}
-
-        # Attach media to each episode and place the episode in its season
         for episode in episodes:
             episode["episode_media"] = media_by_episode.get(episode["episode_id"], [])
-            season_map[episode["season_id"]]["episodes"].append(episode)
+            # Episode images
+            get_episode_images_query = "SELECT image_id, type, format, position, is_primary, source_url FROM episode_images WHERE episode_id=%s"
+            episode_images = await query_aiomysql(conn, get_episode_images_query, (episode["episode_id"],))
+            episode["episode_images"] = [
+                {
+                    "image_id": img["image_id"],
+                    "type": img["type"],
+                    "position": img["position"],
+                    "is_primary": img["is_primary"],
+                    "source_url": img["source_url"],
+                    "path": f"/image/title/{title_id}/season/{episode['season_id']}/episode/{episode['episode_id']}/{img['image_id']}.{img['format']}"
+                } for img in episode_images
+            ]
 
-        # Finally attach the seasons list to the title
-        title_info["seasons"] = list(season_map.values())
-    
-    conn.close()
+        # Map episodes to seasons
+        season_map = {s["season_id"]: {**s, "episodes": []} for s in seasons}
+        for ep in episodes:
+            season_map[ep["season_id"]]["episodes"].append(ep)
 
-    return {"title_info": title_info}
+        title_data["seasons"] = list(season_map.values())
+
+        return {"title_info": title_data}
 
 
 @router.get("/{title_id}/collections")

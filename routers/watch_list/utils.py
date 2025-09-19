@@ -304,44 +304,6 @@ async def convert_season_or_episode_id_to_title_id(conn, season_id=None, episode
     return title_id
 
 
-
-# ############## CHECK FROM FILES ##############
-
-def get_backdrop_count(title_id: int):
-    # Path base
-    base_path = "/fastapi-media/title"
-    
-    # Count of backdrops that exist
-    count = 0
-
-    # Loop through the backdrops from 1 to 5
-    for i in range(1, 6):
-        image_path = os.path.join(base_path, str(title_id), f"backdrop{i}.jpg")
-        
-        # Check if the image exists
-        if os.path.exists(image_path):
-            count += 1
-
-    return count
-
-
-def get_logo_type(title_id: int):
-    # Base path
-    base_path = "/fastapi-media/title"
-    
-    # Possible logo types/extensions to check
-    logo_types = ["png", "svg", "jpg", "jpeg", "webp"]
-
-    # Check for each type
-    for logo_type in logo_types:
-        logo_path = os.path.join(base_path, str(title_id), f"logo.{logo_type}")
-        if os.path.exists(logo_path):
-            return logo_type  # Return the first found type
-
-    return None  # Return None if no logo exists
-
-
-
 # ############## FORMAT ##############
 
 def format_FI_age_rating(rating):

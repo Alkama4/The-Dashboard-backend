@@ -263,3 +263,56 @@ CREATE TABLE IF NOT EXISTS title_media_details (
     UNIQUE(title_id, link)
 );
 
+
+-- Images
+DROP TABLE IF EXISTS title_images;
+CREATE TABLE IF NOT EXISTS title_images (
+    image_id INT AUTO_INCREMENT PRIMARY KEY,
+    title_id INT NOT NULL,
+    type ENUM('poster','backdrop','logo') NOT NULL,
+    format VARCHAR(10) NOT NULL,
+    position TINYINT UNSIGNED DEFAULT 1,
+    is_primary BOOLEAN DEFAULT FALSE,
+    source_url VARCHAR(255) NOT NULL,
+    FOREIGN KEY (title_id) REFERENCES titles(title_id) ON DELETE CASCADE,
+    UNIQUE KEY uq_title_img (title_id, type, position)
+);
+
+DROP TABLE IF EXISTS season_images;
+CREATE TABLE IF NOT EXISTS season_images (
+    image_id INT AUTO_INCREMENT PRIMARY KEY,
+    season_id INT NOT NULL,
+    type ENUM('poster') NOT NULL,
+    format VARCHAR(10) NOT NULL,
+    position TINYINT UNSIGNED DEFAULT 1,
+    is_primary BOOLEAN DEFAULT FALSE,
+    source_url VARCHAR(255) NOT NULL,
+    FOREIGN KEY (season_id) REFERENCES seasons(season_id) ON DELETE CASCADE,
+    UNIQUE KEY uq_season_img (season_id, type, position)
+);
+
+DROP TABLE IF EXISTS episode_images;
+CREATE TABLE IF NOT EXISTS episode_images (
+    image_id INT AUTO_INCREMENT PRIMARY KEY,
+    episode_id INT NOT NULL,
+    type ENUM('still','poster') NOT NULL,
+    format VARCHAR(10) NOT NULL,
+    position TINYINT UNSIGNED DEFAULT 1,
+    is_primary BOOLEAN DEFAULT FALSE,
+    source_url VARCHAR(255) NOT NULL,
+    FOREIGN KEY (episode_id) REFERENCES episodes(episode_id) ON DELETE CASCADE,
+    UNIQUE KEY uq_episode_img (episode_id, type, position)
+);
+
+-- Image colors
+DROP TABLE IF EXISTS image_colors;
+CREATE TABLE IF NOT EXISTS image_colors (
+    color_id INT AUTO_INCREMENT PRIMARY KEY,
+    image_id INT NOT NULL,
+    hex_value CHAR(7) NOT NULL,
+    weight FLOAT UNSIGNED DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (image_id) REFERENCES title_images(image_id) ON DELETE CASCADE,
+    UNIQUE KEY uq_img_hex (image_id, hex_value)
+);
