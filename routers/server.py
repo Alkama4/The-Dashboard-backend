@@ -224,7 +224,8 @@ async def get_fastapi_request_data(timeframe: str = Query(None)):
 
             status_count[code] += 1
             method_count[method] += 1
-            endpoint_count[endpoint] += 1
+            endpoint_key = f"{method} {endpoint}"
+            endpoint_count[endpoint_key] += 1
             client_ip_count[ip] += 1
             minute_buckets[bucket] += 1
 
@@ -306,10 +307,10 @@ async def get_fastapi_request_data(timeframe: str = Query(None)):
                 "endpoint_count": sorted(
                     [
                         {
-                            "endpoint": endpoint,
+                            "endpoint": endpoint,  # now includes method
                             "count": count,
-                            "avg_response_time_ms": round(endpoint_times[endpoint]["total_time"] / endpoint_times[endpoint]["count"])
-                            if endpoint_times[endpoint]["count"] > 0 else 0
+                            "avg_response_time_ms": round(endpoint_times[endpoint.split(' ', 1)[1]]["total_time"] / endpoint_times[endpoint.split(' ', 1)[1]]["count"])
+                            if endpoint_times[endpoint.split(' ', 1)[1]]["count"] > 0 else 0
                         }
                         for endpoint, count in endpoint_count.items()
                     ],
