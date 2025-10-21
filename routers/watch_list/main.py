@@ -13,7 +13,7 @@ from utils import (
     query_aiomysql,
 )
 from .titles import (
-    keep_title_watch_count_up_to_date,
+    keep_tv_watch_count_up_to_date,
 )
 
 # Child routers
@@ -45,7 +45,7 @@ async def update_season_watch_count(season_id: int, data: dict):
             ON DUPLICATE KEY UPDATE watch_count = VALUES(watch_count)
         """
         await query_aiomysql(conn, query, (user_id, watch_count, season_id))
-        await keep_title_watch_count_up_to_date(conn, user_id, season_id=season_id)
+        await keep_tv_watch_count_up_to_date(conn, user_id, season_id=season_id)
 
         conn.close()
 
@@ -71,7 +71,7 @@ async def update_episode_watch_count(episode_id: int, data: dict):
             ON DUPLICATE KEY UPDATE watch_count = new.watch_count
         """
         await query_aiomysql(conn, query, (user_id, episode_id, watch_count))
-        await keep_title_watch_count_up_to_date(conn, user_id, episode_id=episode_id)
+        await keep_tv_watch_count_up_to_date(conn, user_id, episode_id=episode_id)
 
         conn.close()
 
@@ -83,6 +83,8 @@ async def update_episode_watch_count(episode_id: int, data: dict):
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
 
+
+USE_CACHE = False
 # Acts as a middle man between TMDB search and vue. 
 # Adds proper genres and the fact wether the user has added the title or not.
 @router.get("/search")
@@ -101,20 +103,25 @@ async def watch_list_search(
 
         title_lower = title_name.lower()
 
-        # Try to get from Redis cache first
-        search_results = await get_from_cache(title_lower)
+        # Conditionally skip the cache lookup.
+        if USE_CACHE:
+            search_results = await get_from_cache(title_lower)
+        else:
+            search_results = None
+
         if search_results is None:
             found_from_cache = False
             search_results = await query_tmdb(
                 f"/search/{title_category}",
                 {"query": title_name, "include_adult": False}
             )
-            # Store results in Redis cache
-            await add_to_cache(title_lower, search_results, timedelta(weeks=1))
+            # Only cache when the flag allows it.
+            if USE_CACHE:
+                await add_to_cache(title_lower, search_results, timedelta(weeks=1))
+
         else:
             found_from_cache = True
             print(f"Found \"{title_lower}\" from redis. Using it instead of querying TMDB.")
-
         # Retrieve genre mappings from the database
         genre_query = "SELECT tmdb_genre_id, genre_name FROM genres"
         genre_data = await query_aiomysql(conn, genre_query, use_dictionary=False)

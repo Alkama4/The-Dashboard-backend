@@ -152,6 +152,7 @@ CREATE TABLE IF NOT EXISTS episodes (
     UNIQUE(season_id, episode_number), -- Add this unique constraint
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
+CREATE INDEX idx_air_date ON episodes (air_date);
 
 -- User details
 DROP TABLE IF EXISTS user_title_details;

@@ -9,7 +9,10 @@ from utils import (
 )
 from .utils import (
     build_titles_query,
+    build_titles_count_query,
+    map_title_row
 )
+from models.watch_list import TitleQueryParams
 
 router = APIRouter()
 
@@ -115,30 +118,36 @@ async def list_collections(session_key: str = Query(None)):
 
     query = """
         SELECT
-            collection_id,
-            name,
-            description,
-            parent_collection_id
-        FROM user_collection
-        WHERE user_id = %s
-        ORDER BY name
+            c.collection_id,
+            c.name,
+            c.description,
+            c.parent_collection_id,
+            COUNT(DISTINCT t.title_id) AS total_count,
+            MIN(CASE WHEN t.type = 'movie' THEN t.release_date ELSE e.air_date END) AS first_date,
+            MAX(CASE WHEN t.type = 'movie' THEN t.release_date ELSE e.air_date END) AS last_date,
+            SUM(CASE WHEN t.type = 'tv' THEN COALESCE(e.runtime, 0) ELSE t.movie_runtime END) AS total_length
+        FROM user_collection c
+        LEFT JOIN collection_title ct ON c.collection_id = ct.collection_id
+        LEFT JOIN titles t ON ct.title_id = t.title_id
+        LEFT JOIN episodes e ON t.type = 'tv' AND e.title_id = t.title_id
+        WHERE c.user_id = %s
+        GROUP BY c.collection_id
+        ORDER BY c.name
     """
     collections = await query_aiomysql(conn, query, (user_id,))
 
     collection_map = {c['collection_id']: {**c, 'titles': [], 'children': []} for c in collections}
 
     for collection in collection_map.values():
-        query, query_params = build_titles_query(
-            user_id,
+        query, query_params = build_titles_query(user_id, TitleQueryParams(
             collection_id=collection['collection_id'],
             sort_by='release_date',
             direction='ASC',
-            offset=0,
-        )
-        titles = await query_aiomysql(conn, query, tuple(query_params))
-        for row in titles:
-            row["collections"] = row["collections"].split(", ") if row["collections"] else []
-        collection['titles'] = titles
+            title_limit=4
+        ))
+        
+        raw_titles = await query_aiomysql(conn, query, tuple(query_params))
+        collection['preview_titles'] = [map_title_row(row) for row in (raw_titles or [])]
 
     conn.close()
 
@@ -152,6 +161,7 @@ async def list_collections(session_key: str = Query(None)):
 
     return roots
 
+
 @router.get("/{collection_id}")
 async def get_collection(
     collection_id: int,
@@ -162,13 +172,22 @@ async def get_collection(
 
     query = """
         SELECT
-            collection_id,
-            name,
-            description,
-            parent_collection_id
-        FROM user_collection
-        WHERE user_id = %s
-            AND (collection_id = %s OR parent_collection_id = %s)
+            c.collection_id,
+            c.name,
+            c.description,
+            c.parent_collection_id,
+            COUNT(DISTINCT t.title_id) AS total_count,
+            MIN(CASE WHEN t.type = 'movie' THEN t.release_date ELSE e.air_date END) AS first_date,
+            MAX(CASE WHEN t.type = 'movie' THEN t.release_date ELSE e.air_date END) AS last_date,
+            SUM(CASE WHEN t.type = 'tv' THEN COALESCE(e.runtime, 0) ELSE t.movie_runtime END) AS total_length
+        FROM user_collection c
+        LEFT JOIN collection_title ct ON c.collection_id = ct.collection_id
+        LEFT JOIN titles t ON ct.title_id = t.title_id
+        LEFT JOIN episodes e ON t.type = 'tv' AND e.title_id = t.title_id
+        WHERE c.user_id = %s
+            AND (c.collection_id = %s OR c.parent_collection_id = %s)
+        GROUP BY c.collection_id
+        ORDER BY c.name
     """
     result = await query_aiomysql(conn, query, (user_id, collection_id, collection_id))
     if not result:
@@ -194,34 +213,33 @@ async def get_collection(
     # Fetch titles for parent
     query, query_params = build_titles_query(
         user_id,
-        collection_id=parent['collection_id'],
-        sort_by='release_date',
-        direction='ASC',
-        offset=0,
+        params=TitleQueryParams(
+            collection_id=parent['collection_id'],
+            sort_by='release_date',
+            direction='ASC',
+            offset=0,
+        )
     )
     titles = await query_aiomysql(conn, query, tuple(query_params))
-    for row in titles:
-        row["collections"] = row["collections"].split(", ") if row["collections"] else []
-    parent['titles'] = titles
+    parent['titles'] = [map_title_row(row) for row in (titles or [])]
 
     # Fetch titles for each child
     for child in children:
         query, query_params = build_titles_query(
             user_id,
-            collection_id=child['collection_id'],
-            sort_by='release_date',
-            direction='ASC',
-            offset=0,
+            params=TitleQueryParams(
+                collection_id=child['collection_id'],
+                sort_by='release_date',
+                direction='ASC',
+                title_limit=4
+            )
         )
-        titles = await query_aiomysql(conn, query, tuple(query_params))
-        for row in titles:
-            row["collections"] = row["collections"].split(", ") if row["collections"] else []
-        child['titles'] = titles
+        
+        raw_titles = await query_aiomysql(conn, query, tuple(query_params))
+        child['preview_titles'] = [map_title_row(row) for row in (raw_titles or [])]
 
     conn.close()
     return parent
-
-
 
 
 @router.put("/{collection_id}/title/{title_id}")

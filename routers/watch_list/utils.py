@@ -1,51 +1,143 @@
 # External imports
-from typing import Optional
 import json
-
+from typing import Tuple, List, Any
 # Internal imports
-from utils import (
-    query_aiomysql,
-)
+from utils import query_aiomysql
+from models.watch_list import TitleQueryParams
 
 
 # ############## GET TITLES ##############
 
-def build_titles_query(
-    user_id: int, 
-    
-    # Filters 
-    # String or int values (if missing don't filter)
-    title_type: Optional[str] = None, 
-    search_term: Optional[str] = None, 
-    collection_id: Optional[int] = None, 
-    # value1 (true) and value2 (false) (if missing don't filter)
-    in_watchlist: Optional[bool] = None, 
-    watched: Optional[bool] = None,
-    favourite: Optional[bool] = None,
-    released: Optional[bool] = None, 
-    title_in_progress: Optional[bool] = None, 
-    season_in_progress: Optional[bool] = None, 
-    
-    # Sorting
-    sort_by: Optional[str] = None, 
-        # last_updated (default)
-        # rating
-        # popularity
-        # release_date
-        # title_name
-        # duration
-        # data_updated
-    direction: Optional[str] = None, 
-        # DESC/desc (default)
-        # ASC/asc
+def _build_where_clause(
+    user_id: int,
+    params_obj: TitleQueryParams
+) -> Tuple[str, List[Any]]:
+    """
+    Construct a WHERE clause (and its bound parameters) that can be reused by
+    both the list-query builder and the count-query builder.
+    """
+    # Pull individual fields out of the Pydantic model for readability
+    title_type = params_obj.title_type
+    search_term = params_obj.search_term
+    collection_id = params_obj.collection_id
+    in_watchlist = params_obj.in_watchlist
+    watch_status = params_obj.watch_status
+    favourite = params_obj.favourite
+    released = params_obj.released
+    season_in_progress = params_obj.season_in_progress
+    has_media_entry = params_obj.has_media_entry
 
-    # Offset and limit
-    offset: int = 0, 
-    title_limit: Optional[int] = None
+    # Start with a no-op condition so we can safely join with AND
+    conditions: List[str] = ["1=1"]
+    bind_vals: List[Any] = [user_id]
+
+    # ---- Watchlist filter --------------------------------------------------
+    if in_watchlist is True:
+        conditions.append("utd.user_id = %s")
+        bind_vals.append(user_id)
+    elif in_watchlist is False:
+        conditions.append("(utd.user_id != %s OR utd.user_id IS NULL)")
+        bind_vals.append(user_id)
+
+    # ---- Type filter --------------------------------------------------------
+    if title_type:
+        conditions.append("t.type = %s")
+        bind_vals.append(title_type.lower())
+
+    # ---- Watch status sub-clauses ------------------------------------------
+    if watch_status == "unwatched":
+        conditions.append("COALESCE(utd.watch_count, 0) = 0")
+
+    elif watch_status == "partially_watched":
+        conditions.append("""
+            t.type = 'tv'
+            AND utd.watch_count = 0
+            AND EXISTS (
+                SELECT 1 FROM user_episode_details ued
+                JOIN episodes e ON e.episode_id = ued.episode_id
+                WHERE e.title_id = t.title_id
+                    AND ued.user_id = utd.user_id
+                    AND ued.watch_count > 0
+            )
+        """)
+
+    elif watch_status == "fully_watched":
+        conditions.append("utd.watch_count >= 1")
+
+
+    # ---- Favourite ---------------------------------------------------------
+    if favourite is True:
+        conditions.append("utd.favourite = TRUE")
+    elif favourite is False:
+        conditions.append("utd.favourite = FALSE")
+
+    # ---- Released ----------------------------------------------------------
+    if released is True:
+        conditions.append("t.release_date <= CURDATE()")
+    elif released is False:
+        conditions.append("t.release_date > CURDATE()")
+
+    # ---- Season in progress -----------------------------------------------
+    if season_in_progress is False:
+        conditions.append("""
+            NOT EXISTS (
+                SELECT 1 FROM seasons s
+                JOIN episodes e ON e.season_id = s.season_id
+                LEFT JOIN user_episode_details ued
+                  ON ued.episode_id = e.episode_id AND ued.user_id = utd.user_id
+                WHERE s.title_id = t.title_id
+                GROUP BY s.season_id
+                HAVING COUNT(DISTINCT COALESCE(ued.watch_count,0)) > 1
+            )
+        """)
+    elif season_in_progress is True:
+        conditions.append("""
+            EXISTS (
+                SELECT 1 FROM seasons s
+                JOIN episodes e ON e.season_id = s.season_id
+                LEFT JOIN user_episode_details ued
+                  ON ued.episode_id = e.episode_id AND ued.user_id = utd.user_id
+                WHERE s.title_id = t.title_id
+                GROUP BY s.season_id
+                HAVING COUNT(DISTINCT COALESCE(ued.watch_count,0)) > 1
+            )
+        """)
+
+    # ---- Search term -------------------------------------------------------
+    if search_term:
+        # Look for the term in either name or original name
+        conditions.append("(t.name LIKE %s OR t.name_original LIKE %s)")
+        bind_vals.extend([f"%{search_term}%", f"%{search_term}%"])
+
+    # ---- Collection filter -----------------------------------------------
+    if collection_id is not None:
+        conditions.append("ct.collection_id = %s")
+        bind_vals.append(collection_id)
+
+    # ---- Media entry filter -----------------------------------------------
+    if has_media_entry is True:
+        conditions.append(
+            "EXISTS (SELECT 1 FROM title_media_details tmd WHERE tmd.title_id = t.title_id)"
+        )
+    elif has_media_entry is False:
+        conditions.append(
+            "NOT EXISTS (SELECT 1 FROM title_media_details tmd WHERE tmd.title_id = t.title_id)"
+        )
+
+    # Combine all parts into a single string
+    where_sql = " AND ".join(conditions)
+    return where_sql, bind_vals
+
+
+def build_titles_query(
+    user_id: int,
+    params: TitleQueryParams
 ):
-    # - - - - - - Baseline - - - - - -
-    # Base query
-    query = """
+    """
+    Build the full paginated SELECT for titles, including ordering.
+    """
+    # Base SELECT (unchanged from original implementation)
+    base_query = """
         SELECT
             t.*,
             (SELECT COUNT(season_id) FROM seasons WHERE title_id = t.title_id) AS season_count,
@@ -56,28 +148,19 @@ def build_titles_query(
             CASE
                 WHEN t.type = 'tv' THEN
                     EXISTS (
-                        SELECT 1
-                        FROM episodes e
-                        LEFT JOIN user_episode_details ued
-                            ON ued.episode_id = e.episode_id
-                            AND ued.user_id = utd.user_id
+                        SELECT 1 FROM episodes e
+                        LEFT JOIN user_episode_details ued ON ued.episode_id = e.episode_id AND ued.user_id = utd.user_id
                         WHERE e.title_id = t.title_id
-                        AND e.air_date <= CURDATE()
-                        AND e.air_date >= DATE_SUB(CURDATE(), INTERVAL 14 DAY)
-                        AND COALESCE(ued.watch_count, 0) <> 1
+                          AND e.air_date <= CURDATE()
+                          AND e.air_date >= DATE_SUB(CURDATE(), INTERVAL 14 DAY)
+                          AND COALESCE(ued.watch_count, 0) <> 1
                         LIMIT 1
                     )
                 ELSE FALSE
             END AS new_episodes,
-            CASE
-                WHEN utd.title_id IS NOT NULL THEN TRUE
-                ELSE FALSE
-            END AS is_in_watchlist,
+            CASE WHEN utd.title_id IS NOT NULL THEN TRUE ELSE FALSE END AS is_in_watchlist,
             GROUP_CONCAT(
-                CASE
-                    WHEN uc.user_id = utd.user_id THEN uc.name
-                    ELSE NULL
-                END
+                CASE WHEN uc.user_id = utd.user_id THEN uc.name END
                 ORDER BY uc.name ASC SEPARATOR ', '
             ) AS collections,
             GROUP_CONCAT(DISTINCT g.genre_name ORDER BY g.genre_name SEPARATOR ', ') AS genres,
@@ -90,168 +173,82 @@ def build_titles_query(
                     'is_primary', ti.is_primary,
                     'source_url', ti.source_url
                 )
-            )
-            FROM title_images ti
-            WHERE ti.title_id = t.title_id
+             )
+             FROM title_images ti
+             WHERE ti.title_id = t.title_id
             ) AS title_images
-        FROM
-            titles t
-        LEFT JOIN
-            user_title_details utd ON utd.title_id = t.title_id AND utd.user_id = %s
-        LEFT JOIN
-            collection_title ct ON ct.title_id = t.title_id
-        LEFT JOIN
-            user_collection uc ON uc.collection_id = ct.collection_id
-        LEFT JOIN
-            title_genres tg ON tg.title_id = t.title_id
-        LEFT JOIN
-            genres g ON g.genre_id = tg.genre_id
-        WHERE
-            1=1
+        FROM titles t
+        LEFT JOIN user_title_details utd ON utd.title_id = t.title_id AND utd.user_id = %s
+        LEFT JOIN collection_title ct ON ct.title_id = t.title_id
+        LEFT JOIN user_collection uc ON uc.collection_id = ct.collection_id
+        LEFT JOIN title_genres tg ON tg.title_id = t.title_id
+        LEFT JOIN genres g ON g.genre_id = tg.genre_id
     """
 
-    # Base params
-    query_params = [user_id]
+    where_sql, bind_vals = _build_where_clause(user_id, params)
 
-    # - - - - - - Filters - - - - - -
-    # In watch list/not in watchlist/do not care
-    if in_watchlist is True:
-        query += " AND utd.user_id = %s"
-        query_params.append(user_id)
-    elif in_watchlist is False:
-        query += " AND (utd.user_id != %s OR utd.user_id IS NULL)"
-        query_params.append(user_id)
-    # if None, do nothing (all titles)
-
-    # Set title type (tv, movie)
-    if title_type:
-        query += " AND t.type = %s"
-        query_params.append(title_type.lower())
-
-    # Boolean is watched or not (could be a number)
-    if watched is True:
-        query += " AND utd.watch_count >= 1"
-    elif watched is False:
-        query += " AND (utd.watch_count <= 0 OR utd.watch_count IS NULL)"
-
-    # Check if favourite
-    if favourite is True:
-        query += " AND utd.favourite = TRUE"
-    elif favourite is False:
-        query += " AND utd.favourite = FALSE"
-
-    # Check if released
-    if released is True:
-        query += " AND t.release_date <= CURDATE()"
-    elif released is False:
-        query += " AND t.release_date > CURDATE()"
-
-    # Check if all episodes have same watch_count
-    if title_in_progress is False:
-        query += """
-            AND EXISTS (
-                SELECT 1
-                FROM episodes e
-                LEFT JOIN user_episode_details ued
-                    ON ued.episode_id = e.episode_id
-                    AND ued.user_id = utd.user_id
-                WHERE e.title_id = t.title_id
-                GROUP BY e.title_id
-                HAVING COUNT(DISTINCT COALESCE(ued.watch_count, 0)) = 1
-            )
-        """
-    elif title_in_progress is True:
-        query += """
-            AND NOT EXISTS (
-                SELECT 1
-                FROM episodes e
-                LEFT JOIN user_episode_details ued
-                    ON ued.episode_id = e.episode_id
-                    AND ued.user_id = utd.user_id
-                WHERE e.title_id = t.title_id
-                GROUP BY e.title_id
-                HAVING COUNT(DISTINCT COALESCE(ued.watch_count, 0)) = 1
-            )
-        """
-
-    # Check if all episodes within a season have same watch_count
-    if season_in_progress is False:
-        query += """
-            AND NOT EXISTS (
-                SELECT 1
-                FROM seasons s
-                JOIN episodes e ON e.season_id = s.season_id
-                LEFT JOIN user_episode_details ued
-                    ON ued.episode_id = e.episode_id AND ued.user_id = utd.user_id
-                WHERE s.title_id = t.title_id
-                GROUP BY s.season_id
-                HAVING COUNT(DISTINCT COALESCE(ued.watch_count, 0)) > 1
-            )
-        """
-    elif season_in_progress is True:
-        query += """
-            AND EXISTS (
-                SELECT 1
-                FROM seasons s
-                JOIN episodes e ON e.season_id = s.season_id
-                LEFT JOIN user_episode_details ued
-                    ON ued.episode_id = e.episode_id AND ued.user_id = utd.user_id
-                WHERE s.title_id = t.title_id
-                GROUP BY s.season_id
-                HAVING COUNT(DISTINCT COALESCE(ued.watch_count, 0)) > 1
-            )
-        """
-
-    # Filter by keyword (search)
-    if search_term:
-        query += " AND t.name LIKE %s"
-        query_params.append(f"%{search_term}%")
-
-    # Add single collection filter
-    if collection_id is not None:
-        query += " AND ct.collection_id = %s"
-        query_params.append(collection_id)
-
-    # Add group by
+    # Assemble the full query
+    query = base_query + " WHERE " + where_sql
     query += " GROUP BY t.title_id"
 
-    # - - - - - - Sorting - - - - - -
-    # Set direction (default descending)
-    direction = direction.upper() if direction else "DESC"
+    # Ordering (same as original)
+    sort_map = {
+        "rating": "t.tmdb_vote_average",
+        "popularity": "t.tmdb_vote_count",
+        "release_date": "t.release_date",
+        "title_name": "t.name",
+        "duration": """
+            CASE
+                WHEN t.type = 'movie' THEN t.movie_runtime
+                WHEN t.type = 'tv' THEN (
+                    SELECT COALESCE(SUM(e.runtime), 0)
+                    FROM episodes e
+                    WHERE e.title_id = t.title_id
+                )
+                ELSE NULL
+            END""",
+        "data_updated": "t.last_updated",
+        "modified": "utd.last_updated"
+    }
+    order_column = sort_map.get(params.sort_by, "utd.last_updated")
+    direction = params.direction or "DESC"
+    query += f" ORDER BY {order_column} {direction}"
 
-    # Use the sorting parameter
-    if sort_by == "rating":
-        query += f" ORDER BY t.tmdb_vote_average {direction}"
-    elif sort_by == "popularity":
-        query += f"  ORDER BY t.tmdb_vote_count {direction}"
-    elif sort_by == "release_date":
-        query += f" ORDER BY t.release_date {direction}"
-    elif sort_by == "title_name":
-        query += f" ORDER BY t.name {direction}"
-    elif sort_by == "duration":
-        query += f"""
-            ORDER BY
-                CASE
-                    WHEN t.type = 'movie' THEN t.movie_runtime
-                    WHEN t.type = 'tv' THEN (
-                        SELECT COALESCE(SUM(e.runtime), 0)
-                        FROM episodes e
-                        WHERE e.title_id = t.title_id
-                    )
-                    ELSE NULL
-                END {direction}
-        """
-    elif sort_by == "data_updated":
-        query += f" ORDER BY t.last_updated {direction}"
-    else: # sort_by == "modified"
-        query += f" ORDER BY utd.last_updated {direction}"
-
-    # - - - - - - Limit and offset - - - - - -
-    if title_limit:
+    # Pagination
+    if params.title_limit:
         query += " LIMIT %s OFFSET %s"
-        query_params.extend([title_limit, offset * title_limit])
+        bind_vals.extend([params.title_limit,
+                          (params.page - 1) * params.title_limit])
 
-    return query, query_params
+    return query, bind_vals
+
+
+def build_titles_count_query(
+    user_id: int,
+    params: TitleQueryParams
+):
+    """
+    Build a simple COUNT(*) query that re-uses the same WHERE clause.
+    Pagination and ordering are omitted intentionally.
+    """
+    where_sql, bind_vals = _build_where_clause(user_id, params)
+
+    # Optional join to collection_title if a collection filter is present
+    collection_join = (
+        "LEFT JOIN collection_title ct ON ct.title_id = t.title_id"
+        if params.collection_id is not None
+        else ""
+    )
+
+    count_query = f"""
+        SELECT COUNT(DISTINCT t.title_id) AS total
+        FROM titles t
+        LEFT JOIN user_title_details utd ON utd.title_id = t.title_id AND utd.user_id = %s
+        {collection_join}
+        WHERE {where_sql}
+    """
+
+    return count_query, bind_vals
 
 
 def map_title_row(row):

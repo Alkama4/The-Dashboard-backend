@@ -1,5 +1,5 @@
 # External imports
-from fastapi import HTTPException, APIRouter, Query
+from fastapi import HTTPException, APIRouter, Query, Depends
 from typing import Optional
 from pathlib import Path
 import json
@@ -26,11 +26,13 @@ from utils import (
 )
 from .utils import (
     build_titles_query,
+    build_titles_count_query,
     convert_season_or_episode_id_to_title_id,
     format_FI_age_rating,
     tmdb_to_title_id,
     map_title_row,
 )
+from models.watch_list import TitleQueryParams
 
 # Semaphore to limit concurrent tasks with heavy disk usage
 semaphore = asyncio.Semaphore(5)
@@ -83,7 +85,9 @@ async def store_title_images(conn, title_images, title_id: int, replace_images=F
 
         # Backdrops
         if 'backdrops' in title_images:
-            for idx, image in enumerate([img for img in title_images['backdrops'] if img.get('iso_639_1') is None][:5]):
+            for idx, image in enumerate([img for img in title_images['backdrops'] if img.get('iso_639_1') == 'xx'][:5]):
+                print(idx)
+                print(image)
                 source_url = f"https://image.tmdb.org/t/p/original{image['file_path']}"
                 image_id = await _save_image_to_db('backdrop', source_url, position=idx+1)
                 ext = source_url.split('.')[-1].lower()
@@ -213,7 +217,7 @@ async def _extract_and_store_title_image_colors(conn, title_id):
 
 
 
-# ############## CHILD ADD/UPDATE METHODS ##############
+# ############## HELPER METHODS ##############
 
 # Used for the tvs and movies to add the genres to a title avoid duplication
 async def add_or_update_genres_for_title(conn, title_id, tmdb_genres):
@@ -332,7 +336,7 @@ async def get_extra_info_from_omdb(conn, imdb_id, title_id):
 
 
 # Checks the values of the episodes of a tv-series and updates the title watch_count accordingly
-async def keep_title_watch_count_up_to_date(conn, user_id, title_id=None, season_id=None, episode_id=None):
+async def keep_tv_watch_count_up_to_date(conn, user_id, title_id=None, season_id=None, episode_id=None):
     if not title_id:
         title_id = await convert_season_or_episode_id_to_title_id(conn, season_id, episode_id)
 
@@ -340,18 +344,22 @@ async def keep_title_watch_count_up_to_date(conn, user_id, title_id=None, season
         min_watch_count_query = """
             SELECT MIN(COALESCE(ued.watch_count, 0))
             FROM episodes e
-            LEFT JOIN user_episode_details ued ON e.episode_id = ued.episode_id AND ued.user_id = %s
+            LEFT JOIN user_episode_details ued
+                ON e.episode_id = ued.episode_id AND ued.user_id = %s
             WHERE e.title_id = %s
+              AND e.air_date IS NOT NULL
+              AND e.air_date <= CURDATE()
         """
         result = await query_aiomysql(conn, min_watch_count_query, (user_id, title_id), use_dictionary=False)
         min_watch_count = result[0][0] if result else 0
-        print(min_watch_count)
+
         update_title_watch_count_query = """
             INSERT INTO user_title_details (user_id, title_id, watch_count)
             VALUES (%s, %s, %s)
             ON DUPLICATE KEY UPDATE watch_count = %s
         """
-        await query_aiomysql(conn, update_title_watch_count_query, (user_id, title_id, min_watch_count, min_watch_count))
+        await query_aiomysql(conn, update_title_watch_count_query,
+                             (user_id, title_id, min_watch_count, min_watch_count))
 
 
 
@@ -640,7 +648,7 @@ async def add_or_update_tv_title(
                 tv_title_info.get('poster_path'),
                 tv_title_info.get('backdrop_path'),
                 # there's no runtime since its tv
-                tv_title_info.get('first_air_date'),
+                tv_title_info.get('first_air_date') if tv_title_info.get('first_air_date') else None, # mysql fails if '', so set to None
                 tv_title_info.get('original_language'),
                 tv_title_age_rating,
                 # tv_title_info.get('revenue'), # Doesn't seem to exist on tv
@@ -962,6 +970,7 @@ async def add_user_title(data: dict):
             "message": 'Title added successfully to your watchlist!'
         }
 
+
 @router.delete("/{title_id}")
 async def remove_user_title(title_id: int, data: dict):
     conn = await aiomysql_connect()
@@ -1105,10 +1114,12 @@ async def update_title_watch_count(title_id: int, data: dict):
                 SELECT %s, episode_id, %s
                 FROM episodes
                 WHERE title_id = %s
+                AND air_date IS NOT NULL
+                AND air_date <= CURDATE()
                 ON DUPLICATE KEY UPDATE watch_count = VALUES(watch_count)
             """
             await query_aiomysql(conn, query, (user_id, watch_count, title_id))
-            await keep_title_watch_count_up_to_date(conn, user_id, title_id=title_id)
+            await keep_tv_watch_count_up_to_date(conn, user_id, title_id=title_id)
 
         else:
             raise HTTPException(status_code=400, detail="Invalid title type")
@@ -1297,63 +1308,36 @@ async def get_title_cards(
 @router.get("")
 async def list_titles(
     session_key: str = Query(...),
-
-    search_term: Optional[str] = None,
-    collection_id: Optional[int] = None,
-    title_type: Optional[str] = None,
-    in_watchlist: Optional[bool] = None,
-    watched: Optional[bool] = None,
-    favourite: Optional[bool] = None,
-    released: Optional[bool] = None,
-    title_in_progress: Optional[bool] = None,
-    season_in_progress: Optional[bool] = None,
-    
-    sort_by: Optional[str] = None,
-    direction: Optional[str] = None,
-
-    offset: Optional[int] = 0,
-    title_limit: Optional[int] = None,
+    params: TitleQueryParams = Depends()
 ):
-    
-    conn = await aiomysql_connect()
-    user_id = await validate_session_key_conn(conn, session_key, guest_lock=False)
+    async with aiomysql_conn_get() as conn:  
+        conn = await aiomysql_connect()
+        user_id = await validate_session_key_conn(conn, session_key, guest_lock=False)
 
-    title_limit = await fetch_user_settings(conn, user_id, 'list_all_titles_load_limit') or 30
+        # Options
+        title_limit = await fetch_user_settings(conn, user_id, 'list_all_titles_load_limit') or 30
+        params.title_limit = title_limit + 1
 
-    query, query_params = build_titles_query(
-        user_id=user_id, 
+        # Titles
+        query, query_params = build_titles_query(user_id=user_id, params=params)
+        titles = await query_aiomysql(conn, query, tuple(query_params), use_dictionary=True)
 
-        title_type=title_type, 
-        in_watchlist=in_watchlist, 
-        watched=watched, 
-        favourite=favourite, 
-        released=released, 
-        title_in_progress=title_in_progress, 
-        season_in_progress=season_in_progress,
-        collection_id=collection_id, 
-        search_term=search_term, 
-        
-        sort_by=sort_by, 
-        direction=direction, 
-        
-        offset=offset, 
-        title_limit=title_limit + 1
-    )
+        has_more = len(titles) > title_limit
+        titles = titles[:title_limit]
 
-    titles = await query_aiomysql(conn, query, tuple(query_params), use_dictionary=True)
+        titles = [map_title_row(row) for row in titles]
 
-    conn.close()
+        # Title count
+        query, query_params = build_titles_count_query(user_id=user_id, params=params)
+        total_count = await query_aiomysql(conn, query, tuple(query_params), use_dictionary=True)
+        total_count = total_count[0]['total']
 
-    has_more = len(titles) > title_limit
-    titles = titles[:title_limit]
-
-    titles = [map_title_row(row) for row in titles]
-
-    return {
-        "titles": titles,
-        "has_more": has_more,
-        "offset": offset,
-    }
+        return {
+            "titles": titles,
+            "has_more": has_more,
+            "page": params.page,
+            "total_count": total_count
+        }
 
 
 @router.get("/showcase")
@@ -1365,17 +1349,20 @@ async def get_showcase(
 
     # Get user_id and validate session key
     user_id = await validate_session_key_conn(conn, session_key, guest_lock=False)
-    
-    query, query_params = build_titles_query(
-        user_id=user_id,
 
+    params = TitleQueryParams(
         in_watchlist=True,
         released=True,
         watched=False,
-        sort_by='release_date',
-
+        sort_by="release_date",
         title_limit=5,
     )
+    
+    query, query_params = build_titles_query(
+        user_id=user_id,
+        params=params
+    )
+    
     titles = await query_aiomysql(conn, query, query_params)
     titles = [map_title_row(row) for row in titles]
 
@@ -1566,7 +1553,6 @@ async def update_title_media_links(
 ):
     async with aiomysql_conn_get() as conn:
         internal_media_base_path = "/media"
-        external_media_base_path = os.getenv("EXTERNAL_MEDIA_BASE_PATH", "")
         media_exts = (".mkv", ".mp4", ".avi")
 
         def _clean(name: str) -> str:
@@ -1725,7 +1711,7 @@ async def update_title_media_links(
 
                 compare_cache[cache_key] = matches
 
-            link = internal_path.replace(internal_media_base_path, external_media_base_path)
+            link = internal_path.replace(internal_media_base_path, "")
             extra_name = None
             extra_parent_folder = None
             content_type = None
