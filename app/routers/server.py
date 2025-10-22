@@ -3,7 +3,6 @@ from collections import defaultdict
 from datetime import timedelta, datetime, timezone
 import json
 import psutil
-import docker
 from fastapi import HTTPException, Query, APIRouter
 
 # Internal imports
@@ -11,10 +10,6 @@ from utils import format_time_difference, redis_client, aiomysql_conn_get, query
 
 # Create the router object for this module
 router = APIRouter()
-
-# Docker client for container info
-client = docker.DockerClient(base_url='unix://var/run/docker.sock')
-
 
 @router.get("/drives")
 def get_server_drives_info():
@@ -456,33 +451,3 @@ async def get_backups():
             return {"backups": formatted_backups}
         else:
             raise HTTPException(status_code=404, detail="No backups found.")
-
-
-@router.get("/containers")
-def list_containers():
-    stacks = defaultdict(list)
-    for container in client.containers.list(all=True):
-        info = container.attrs
-        state = info["State"]
-        labels = info.get("Config", {}).get("Labels", {})
-        stack = labels.get("com.docker.compose.project", "unknown")
-
-        started = datetime.strptime(state["StartedAt"][:19], '%Y-%m-%dT%H:%M:%S')
-        if state["Running"]:
-            uptime = datetime.utcnow() - started
-        else:
-            finished = datetime.strptime(state["FinishedAt"][:19], '%Y-%m-%dT%H:%M:%S')
-            uptime = finished - started
-
-        image = container.image.tags[0] if container.image.tags else container.image.short_id
-
-        stacks[stack].append({
-            "id": container.short_id,
-            "name": container.name,
-            "image": image,
-            "status": state["Status"],
-            "exit_code": state.get("ExitCode"),
-            "uptime": str(uptime.total_seconds())
-        })
-
-    return stacks

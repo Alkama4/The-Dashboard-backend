@@ -6,6 +6,5 @@ redis
 aiomysql
 httpx
 cryptography
-docker
 colorgram.py
 uuid
