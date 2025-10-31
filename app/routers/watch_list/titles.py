@@ -431,7 +431,11 @@ async def get_title_media_details(conn, title_id):
         FROM title_media_details
         WHERE title_id = %s
     """
-    rows = await query_aiomysql(conn, query, (title_id,))
+    rows = await query_aiomysql(conn, query, (title_id,), use_dictionary=True)
+
+    base_path = os.getenv("EXTERNAL_MEDIA_BASE_PATH", "")
+    for r in rows:
+        r["link"] = base_path + r["link"]
 
     # Split into separate lists
     return {
@@ -1897,6 +1901,21 @@ async def update_title_media_links(
 
                 asyncio.create_task(update_metadata())
 
+        # after collecting results
+        existing_links = [r["link"] for r in results if r.get("matching_db_titles")]
+        if existing_links:
+            if updating_for_single_title:
+                delete_query = """
+                    DELETE FROM title_media_details
+                    WHERE title_id = %s AND link NOT IN %s
+                """
+                await query_aiomysql(conn, delete_query, (title_id, tuple(existing_links)))
+            else:
+                delete_query = """
+                    DELETE FROM title_media_details
+                    WHERE link NOT IN %s
+                """
+                await query_aiomysql(conn, delete_query, (tuple(existing_links),))
 
         return {
             'message': 'Entries for media created! Metadata is still being acquired asynchronously in the background.'
