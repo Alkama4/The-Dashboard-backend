@@ -208,9 +208,31 @@ def build_titles_query(
                 ELSE NULL
             END""",
         "data_updated": "t.last_updated",
-        "modified": "utd.last_updated"
+        "modified": """
+            GREATEST(
+                utd.last_updated,
+                (
+                    SELECT MAX(ued.last_updated)
+                    FROM episodes e
+                    LEFT JOIN user_episode_details ued
+                        ON ued.episode_id = e.episode_id AND ued.user_id = utd.user_id
+                    WHERE e.title_id = t.title_id
+                )
+            )
+        """
     }
-    order_column = sort_map.get(params.sort_by, "utd.last_updated")
+    order_column = sort_map.get(params.sort_by, """
+        GREATEST(
+            utd.last_updated,
+            (
+                SELECT MAX(ued.last_updated)
+                FROM episodes e
+                LEFT JOIN user_episode_details ued
+                    ON ued.episode_id = e.episode_id AND ued.user_id = utd.user_id
+                WHERE e.title_id = t.title_id
+            )
+        )"""
+    )
     direction = params.direction or "DESC"
     query += f" ORDER BY {order_column} {direction}"
 
