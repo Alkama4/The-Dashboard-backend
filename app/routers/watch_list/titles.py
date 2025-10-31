@@ -85,7 +85,7 @@ async def store_title_images(conn, title_images, title_id: int, replace_images=F
 
         # Backdrops
         if 'backdrops' in title_images:
-            for idx, image in enumerate([img for img in title_images['backdrops'] if img.get('iso_639_1') == 'xx'][:5]):
+            for idx, image in enumerate([img for img in title_images['backdrops'] if img.get('iso_639_1') is None][:5]):
                 print(idx)
                 print(image)
                 source_url = f"https://image.tmdb.org/t/p/original{image['file_path']}"
