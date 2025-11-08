@@ -2,8 +2,8 @@
 import json
 from typing import Tuple, List, Any
 # Internal imports
-from utils import query_aiomysql
-from models.watch_list import TitleQueryParams
+from app.utils import query_aiomysql
+from app.models.watch_list import TitleQueryParams
 
 
 # ############## GET TITLES ##############

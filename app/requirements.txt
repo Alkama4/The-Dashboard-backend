@@ -2,9 +2,9 @@ mysql-connector-python
 psutil
 pandas
 pillow
-redis
 aiomysql
 httpx
 cryptography
 colorgram.py
 uuid
+fastapi

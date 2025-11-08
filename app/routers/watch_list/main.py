@@ -3,10 +3,8 @@ from datetime import timedelta
 from fastapi import HTTPException, APIRouter, Query
 
 # Internal imports
-from utils import (
+from app.utils import (
     query_tmdb,
-    add_to_cache,
-    get_from_cache,
     validate_session_key_conn,
     aiomysql_conn_get,
     aiomysql_connect,
@@ -84,7 +82,6 @@ async def update_episode_watch_count(episode_id: int, data: dict):
 
 
 
-USE_CACHE = False
 # Acts as a middle man between TMDB search and vue. 
 # Adds proper genres and the fact wether the user has added the title or not.
 @router.get("/search")
@@ -97,31 +94,15 @@ async def watch_list_search(
         # Validate the session key and retrieve the user ID
         user_id = await validate_session_key_conn(conn, session_key, guest_lock=False)
 
-        # Fetch search results from cache or TMDB API
+        # Fetch search results from TMDB API
         if not title_name:
             raise HTTPException(status_code=400, detail="Title name is required.")
 
-        title_lower = title_name.lower()
+        search_results = await query_tmdb(
+            f"/search/{title_category}",
+            {"query": title_name, "include_adult": False}
+        )
 
-        # Conditionally skip the cache lookup.
-        if USE_CACHE:
-            search_results = await get_from_cache(title_lower)
-        else:
-            search_results = None
-
-        if search_results is None:
-            found_from_cache = False
-            search_results = await query_tmdb(
-                f"/search/{title_category}",
-                {"query": title_name, "include_adult": False}
-            )
-            # Only cache when the flag allows it.
-            if USE_CACHE:
-                await add_to_cache(title_lower, search_results, timedelta(weeks=1))
-
-        else:
-            found_from_cache = True
-            print(f"Found \"{title_lower}\" from redis. Using it instead of querying TMDB.")
         # Retrieve genre mappings from the database
         genre_query = "SELECT tmdb_genre_id, genre_name FROM genres"
         genre_data = await query_aiomysql(conn, genre_query, use_dictionary=False)
@@ -167,7 +148,6 @@ async def watch_list_search(
 
         return {
             'result': search_results,
-            'used_cache': found_from_cache
         }
 
 

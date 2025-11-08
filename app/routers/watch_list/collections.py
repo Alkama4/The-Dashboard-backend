@@ -2,7 +2,7 @@
 from fastapi import HTTPException, APIRouter, Query
 
 # Internal imports
-from utils import (
+from app.utils import (
     validate_session_key_conn,
     aiomysql_connect,
     query_aiomysql,
@@ -12,7 +12,7 @@ from .utils import (
     build_titles_count_query,
     map_title_row
 )
-from models.watch_list import TitleQueryParams
+from app.models.watch_list import TitleQueryParams
 
 router = APIRouter()
 

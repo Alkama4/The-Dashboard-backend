@@ -7,7 +7,7 @@ from datetime import timedelta
 import pandas as pd
 
 # Internal imports
-from utils import validate_session_key_conn, aiomysql_conn_get, query_aiomysql, fetch_user_settings
+from app.utils import validate_session_key_conn, aiomysql_conn_get, query_aiomysql, fetch_user_settings
 
 # Create the router object for this module
 router = APIRouter()

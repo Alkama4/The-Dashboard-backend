@@ -1,18 +1,13 @@
 # External imports
-import time
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from datetime import datetime, timezone
-import json
 
 
 # Internal imports
-from routers.account import router as account_router 
-from routers.media import router as media_router
-from routers.server import router as server_router 
-from routers.spendings import router as spendings_router 
-from routers.watch_list import router as watch_list_router 
-from utils import redis_client
+from app.routers.account import router as account_router 
+from app.routers.media import router as media_router
+from app.routers.spendings import router as spendings_router 
+from app.routers.watch_list import router as watch_list_router 
 
 # Create fastAPI instance and set CORS middleware
 # Could limit the addresses but works fine as is, since only hosted on LAN.
@@ -27,45 +22,9 @@ app.add_middleware(
 # Include the account routes in the FastAPI app
 app.include_router(account_router, prefix="/account", tags=["account"])
 app.include_router(media_router, prefix="/media", tags=["media"])
-app.include_router(server_router, prefix="/server", tags=["server"])
 app.include_router(spendings_router, prefix="/spendings", tags=["spendings"])
 app.include_router(watch_list_router, prefix="/watch_list", tags=["watch_list"])
 
-
-MAX_LOGS_AMOUNT = 10000
-
-# Runs everytime any endpoint is called. Used to log the requests for analysis.
-@app.middleware("http")
-async def log_request_data(request: Request, call_next):
-    # Skip the special endpoint
-    if request.url.path == "/api/server/logs/system_resources":
-        return await call_next(request)
-
-    start_time = time.time()
-    response = await call_next(request)
-    process_time = time.time() - start_time
-
-    # Use the route template if available; otherwise fall back to the raw path
-    route = request.scope.get("route")
-    endpoint = route.path if route else request.url.path
-
-    client_ip = (
-        request.headers.get("x-forwarded-for", request.client.host).split(",")[0].strip()
-    )
-
-    log_entry = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "endpoint": endpoint,          # e.g. /watch_list/titles/{title_id}/collections
-        "status_code": response.status_code,
-        "backend_time_ms": round(process_time * 1000, 2),
-        "client_ip": client_ip,
-        "method": request.method,
-    }
-
-    await redis_client.lpush("fastapi_request_logs", json.dumps(log_entry))
-    await redis_client.ltrim("fastapi_request_logs", 0, MAX_LOGS_AMOUNT - 1)
-
-    return response
 
 # Landing page that dynamically shows endpoints
 @app.get("/")

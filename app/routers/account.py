@@ -9,7 +9,7 @@ from io import BytesIO
 from PIL import Image
 
 # Internal imports
-from utils import aiomysql_conn_get, query_aiomysql, validate_session_key_conn
+from app.utils import aiomysql_conn_get, query_aiomysql, validate_session_key_conn
 
 # Create the router object for this module
 router = APIRouter()

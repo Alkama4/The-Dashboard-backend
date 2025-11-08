@@ -13,7 +13,7 @@ from difflib import SequenceMatcher
 import colorgram
 
 # Internal imports
-from utils import (
+from app.utils import (
     fetch_user_settings,
     validate_session_key_conn,
     aiomysql_connect,
@@ -32,7 +32,7 @@ from .utils import (
     tmdb_to_title_id,
     map_title_row,
 )
-from models.watch_list import TitleQueryParams
+from app.models.watch_list import TitleQueryParams
 
 # Semaphore to limit concurrent tasks with heavy disk usage
 semaphore = asyncio.Semaphore(5)

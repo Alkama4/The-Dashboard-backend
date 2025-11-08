@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
 
 # Internal imports
-from utils import ALLOWED_WIDTHS, MEDIA_BASE_PATH
+from app.utils import ALLOWED_WIDTHS, MEDIA_BASE_PATH
 
 # Create the router object for this module
 router = APIRouter()

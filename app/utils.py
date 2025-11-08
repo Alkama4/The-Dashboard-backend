@@ -1,11 +1,8 @@
 # Standard libraries
 import asyncio
-import redis.asyncio as redis
 import os
 import httpx
 from fastapi import HTTPException
-from datetime import timedelta
-import json
 import aiomysql
 from contextlib import asynccontextmanager
 
@@ -15,10 +12,6 @@ semaphore = asyncio.Semaphore(5)
 # Image sizes and storing location
 ALLOWED_WIDTHS = {300, 600, 900, 1200}
 MEDIA_BASE_PATH = "/fastapi-media"
-
-# Set up aioredis client
-redis_client = redis.from_url(os.getenv("REDIS_PATH", "redis://127.0.0.1:6379"), decode_responses=True)
-
 
 
 # ############## AIOMYSQL ##############
@@ -71,24 +64,6 @@ async def query_aiomysql(
         if return_rowcount:
             return cursor.rowcount
         return await cursor.fetchall()
-
-
-
-# ############## CACHE ##############
-
-# Helper function to store to redis cache
-async def add_to_cache(key: str, data: dict, timedelta: timedelta):
-    # Store the data as JSON in Redis with an expiration of 1 week
-    await redis_client.setex(key, timedelta, json.dumps(data))
-
-
-# Helper function to retrieve from redis cache
-async def get_from_cache(key: str) -> dict:
-    # Retrieve data from Redis and parse it
-    data = await redis_client.get(key)
-    if data:
-        return json.loads(data)
-    return None
 
 
 
