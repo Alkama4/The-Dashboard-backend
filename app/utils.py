@@ -24,7 +24,7 @@ async def aiomysql_connect():
         password=os.getenv("DB_PASSWORD", ""),
         db=os.getenv("DB_NAME", ""),
         host=os.getenv("DB_HOST", "the-dashboard-mysql"),
-        port=os.getenv("DB_PORT", "3306")
+        port = int(os.getenv("DB_PORT", 3306))
     )
 
 

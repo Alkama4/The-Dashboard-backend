@@ -180,7 +180,7 @@ CREATE TABLE IF NOT EXISTS user_episode_details (
     notes TEXT DEFAULT NULL,  
     PRIMARY KEY (user_id, episode_id),
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-    FOREIGN KEY (episode_id) REFERENCES episodes(episode_id) ON DELETE CASCADE
+    FOREIGN KEY (episode_id) REFERENCES episodes(episode_id) ON DELETE CASCADE,
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 CREATE INDEX idx_ued_episode_user_watch ON user_episode_details (episode_id, user_id, watch_count);
