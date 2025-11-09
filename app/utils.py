@@ -20,11 +20,11 @@ MEDIA_BASE_PATH = "/fastapi-media"
 # Do not use this to connect, instead use the "aiomysql_conn_get" to use as the connection
 async def aiomysql_connect():
     return await aiomysql.connect(
-        user=os.getenv("DB_USER", "default"),
-        password=os.getenv("DB_PASSWORD", "default"),
-        db=os.getenv("DB_NAME", "default"),
-        host=os.getenv("DB_HOST", "default"),
-        port=3306
+        user=os.getenv("DB_USER", ""),
+        password=os.getenv("DB_PASSWORD", ""),
+        db=os.getenv("DB_NAME", ""),
+        host=os.getenv("DB_HOST", "the-dashboard-mysql"),
+        port=os.getenv("DB_PORT", "3306")
     )
 
 
@@ -87,7 +87,7 @@ async def query_tmdb(endpoint: str, params: dict = {}):
 # Function to query for additional data like IMDB ratings from OMDB
 async def query_omdb(imdb_id: str):
     params = {}
-    params["apikey"] = os.getenv('OMDB_APIKEY', 'default_key')
+    params["apikey"] = os.getenv('OMDB_API_KEY', 'default_key')
     params["i"] = imdb_id
 
     print(f"Querying OMDB: {imdb_id}")

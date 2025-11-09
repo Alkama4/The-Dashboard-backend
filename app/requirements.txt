@@ -8,3 +8,4 @@ cryptography
 colorgram.py
 uuid
 fastapi
+python-dotenv

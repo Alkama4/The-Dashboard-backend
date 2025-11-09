@@ -1,13 +1,16 @@
 # External imports
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-
+from dotenv import load_dotenv
 
 # Internal imports
 from app.routers.account import router as account_router 
 from app.routers.media import router as media_router
 from app.routers.spendings import router as spendings_router 
 from app.routers.watch_list import router as watch_list_router 
+
+# Load up development enviroment variables
+load_dotenv('.env.local')
 
 # Create fastAPI instance and set CORS middleware
 # Could limit the addresses but works fine as is, since only hosted on LAN.
