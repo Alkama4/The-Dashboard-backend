@@ -1,5 +1,6 @@
-> **Note**: This project has been deprecated. Development has stopped.
-Separate spending-tracking and watchlist apps are being rebuilt.
+> [!IMPORTANT]
+> **Project Deprecated**: Development has stopped. 
+> Separate spending-tracking and watchlist apps are being rebuilt.
 
 ## Overview
 
